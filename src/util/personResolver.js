@@ -2,7 +2,7 @@ import { scoreAll } from './fuzzy.js';
 import { normalise } from './text.js';
 
 function aliases(person) {
-  return [...new Set([person.display_name, person.push_name].map(v => String(v || '').trim()).filter(Boolean))];
+  return [...new Set([person.display_name, person.push_name, ...(Array.isArray(person.phone_numbers) ? person.phone_numbers : [])].map(v => String(v || '').trim()).filter(Boolean))];
 }
 
 /** Resolve a person only when there is one strong, clearly separated match. */
@@ -10,6 +10,18 @@ export function findPersonTarget(query, people) {
   if (!people.length) return { match: null, candidates: [] };
   const wanted = normalise(query || '');
   if (!wanted) return { match: null, candidates: people.slice(0, 10).map(item => ({ item, score: 0 })) };
+
+  // Phone numbers are often written with spaces or a leading + in owner commands.
+  // Compare digits separately so the canonical number alias resolves exactly.
+  const wantedDigits = String(query || '').replace(/\D/g, '');
+  if (wantedDigits.length >= 7) {
+    const phoneMatches = people.filter(person => {
+      const phones = [person.display_name, ...(Array.isArray(person.phone_numbers) ? person.phone_numbers : [])];
+      return phones.some(value => String(value || '').replace(/\D/g, '') === wantedDigits);
+    });
+    if (phoneMatches.length === 1) return { match: phoneMatches[0], candidates: [{ item: phoneMatches[0], score: 1 }] };
+    if (phoneMatches.length > 1) return { match: null, candidates: phoneMatches.map(item => ({ item, score: 1 })) };
+  }
 
   const exact = people.filter(person => aliases(person).some(name => normalise(name) === wanted));
   // A short first-name/nickname must not silently select one person when other

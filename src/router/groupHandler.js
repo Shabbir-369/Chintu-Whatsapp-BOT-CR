@@ -11,7 +11,8 @@ import { getRefusalLine, getBusyLine, getDeflectLine, getFallbackLine } from '..
 import { answerTimetableQuestion } from '../skills/timetable.js';
 import { runMassBunkAnalysis } from '../skills/massBunk.js';
 import { humanSend, sendReaction, pickReactionEmoji } from '../gateway/outbox.js';
-import { getLastBotReplies } from '../db/repos/messages.js';
+import { getLastBotReplies, getRecentMessages } from '../db/repos/messages.js';
+import { buildConversationHistory } from '../util/conversationContext.js';
 import { recordReply, recordGroupReply } from '../policy/limits.js';
 import { touchGroupBotAt, getGroup } from '../db/repos/groups.js';
 import { writeAuditLog } from '../db/repos/timetable.js';
@@ -294,6 +295,12 @@ async function generateGroupReply(ctx, toneMode, decision, ownerChatJid) {
     });
 
     const recentReplies = await getLastBotReplies(chatJid, 8);
+    const recentRows = await getRecentMessages(chatJid, 16).catch(() => []);
+    const conversationHistory = buildConversationHistory(recentRows, {
+      currentWaId: rawMsg?.key?.id,
+      isGroup: true,
+      limit: 12,
+    });
 
     // Group LLM receives conversation memory only. Never inject live timetable,
     // attendance, calendar, or Pod data into an ordinary group conversation.
@@ -305,13 +312,13 @@ async function generateGroupReply(ctx, toneMode, decision, ownerChatJid) {
     });
 
     // Generate reply
-    const result = await generateReply(systemPrompt, [], text, isOwner);
+    const result = await generateReply(systemPrompt, conversationHistory, text, isOwner);
 
     // Handle LLM-detected flags that override tone (§15.3)
     if (result.flags?.serious_distress) {
       const seriousResult = await generateReply(
         buildSystemPrompt({ toneMode: 'serious', memoryPack, isGroup: true }),
-        [], text
+        conversationHistory, text
       );
       const parts = seriousResult.reply_parts || [];
       if (parts[0]) {
@@ -328,7 +335,7 @@ async function generateGroupReply(ctx, toneMode, decision, ownerChatJid) {
     if (result.flags?.attack_on_owner) {
       const defResult = await generateReply(
         buildSystemPrompt({ toneMode: 'defender', memoryPack, isGroup: true }),
-        [], text
+        conversationHistory, text
       );
       const parts = defResult.reply_parts || [];
       if (parts[0]) {

@@ -8,6 +8,7 @@ import {
   getLastDailySummary, getPersonProfile, getPersonFacts,
   updatePersonProfile,
 } from '../db/repos/memory.js';
+import { getPersonById } from '../db/repos/people.js';
 import { getGroupProfile } from '../db/repos/groups.js';
 import { getLogger } from '../logger.js';
 
@@ -70,8 +71,9 @@ export async function processMemoryOps(ops, personId, groupJid, isGroup) {
  */
 export async function buildMemoryPack({ personId, groupJid, messageText, isGroup }) {
   try {
-    const [personProfile, groupProfile, memories, facts] = await Promise.all([
+    const [personProfile, personRecord, groupProfile, memories, facts] = await Promise.all([
       personId ? getPersonProfile(personId).catch(() => null) : null,
+      personId ? getPersonById(personId).catch(() => null) : null,
       groupJid ? getGroupProfile(groupJid).catch(() => null) : null,
       retrieveMemoryPack({ personId, groupJid, messageText, limit: 6 }).catch(() => []),
       personId ? getPersonFacts(personId, 5).catch(() => []) : [],
@@ -82,7 +84,7 @@ export async function buildMemoryPack({ personId, groupJid, messageText, isGroup
 
     return {
       personProfile: personProfile ? {
-        name: personProfile.display_name || 'unknown',
+        name: personRecord?.display_name || personRecord?.push_name || personProfile.display_name || 'unknown',
         familiarity: personProfile.familiarity,
         humourStyle: personProfile.humour_style,
         teasingTolerance: personProfile.teasing_tolerance,

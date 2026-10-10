@@ -21,7 +21,8 @@ import { buildSystemPrompt } from '../brain/persona.js';
 import { buildMemoryPack, processMemoryOps } from '../brain/memory.js';
 import { guardOutput } from '../brain/guard.js';
 import { getFallbackLine, getBusyLine } from '../brain/fallback.js';
-import { getLastBotReplies } from '../db/repos/messages.js';
+import { getLastBotReplies, getRecentMessages } from '../db/repos/messages.js';
+import { buildConversationHistory } from '../util/conversationContext.js';
 import { recordReply } from '../policy/limits.js';
 import { decide } from '../brain/decision.js';
 import { getLogger } from '../logger.js';
@@ -331,6 +332,12 @@ async function generateDmReply(ctx) {
       isGroup: false,
     });
     const recentReplies = await getLastBotReplies(chatJid, 8);
+    const recentRows = await getRecentMessages(chatJid, 16).catch(() => []);
+    const conversationHistory = buildConversationHistory(recentRows, {
+      currentWaId: rawMsg?.key?.id,
+      isGroup: false,
+      limit: 12,
+    });
 
     // Check budget
     const exhausted = await isBudgetExhausted();
@@ -365,7 +372,7 @@ async function generateDmReply(ctx) {
       isOwnerMessage: false,
     });
 
-    const result = await generateReply(systemPrompt, [], text, false);
+    const result = await generateReply(systemPrompt, conversationHistory, text, false);
 
     // Guard output
     const parts = result.reply_parts || [];

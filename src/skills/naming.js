@@ -4,7 +4,7 @@
  * Proposals sent to owner, approved names stored in people.display_name.
  */
 import { createApproval, genCode, decideApproval, createNameClaim, decideNameClaim } from '../db/repos/approvals.js';
-import { setDisplayName, findPeopleByName } from '../db/repos/people.js';
+import { setDisplayName, findPeopleByName, claimNamePrompt, getPersonPhone } from '../db/repos/people.js';
 import { getLogger } from '../logger.js';
 
 const log = getLogger('skills/naming');
@@ -94,4 +94,19 @@ export function getAddressableName(person) {
   // Neutral: don't use raw WhatsApp push_name until owner-approved
   const neutrals = ['bhai', 'tu', 'yaar', 'tum'];
   return neutrals[Math.floor(Math.random() * neutrals.length)];
+}
+
+/** Ask the owner to name an unknown phone-number-labeled group member once. */
+export async function requestOwnerNameForUnknownPerson({ person, ownerChatJid, send }) {
+  if (!person?.id || !ownerChatJid || typeof send !== 'function') return false;
+  const phone = await getPersonPhone(person.id).catch(() => null);
+  if (!phone) return false;
+  const claimed = await claimNamePrompt(person.id).catch(() => false);
+  if (!claimed) return false;
+  const current = String(person.display_name || '').replace(/\D/g, '');
+  if (current && current !== phone) return false;
+  const pushName = String(person.push_name || '').trim();
+  const line = `👤 Unknown contact in a group\nNumber: +${phone}\n${pushName ? `WhatsApp name: ${pushName}\n` : ''}Current label is the number until you name them.\nReply: \`name +${phone} as Their Name\``;
+  await send(ownerChatJid, line);
+  return true;
 }

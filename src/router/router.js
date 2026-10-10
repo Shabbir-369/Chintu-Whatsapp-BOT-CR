@@ -11,6 +11,7 @@ import { config } from '../config.js';
 import { getLogger } from '../logger.js';
 import { isExtractionAttempt, guardOutput } from '../brain/guard.js';
 import { getDeflectLine } from '../brain/fallback.js';
+import { requestOwnerNameForUnknownPerson } from '../skills/naming.js';
 
 const log = getLogger('router/router');
 
@@ -91,6 +92,16 @@ export async function route(ctx) {
       return;
     }
 
+    // If a group member has no known name, keep their phone number as the
+    // stable label and ask the owner once. This does not expose private data.
+    if (isGroup && person && !isOwner) {
+      await requestOwnerNameForUnknownPerson({
+        person,
+        ownerChatJid,
+        send: async (jid, message) => humanSend(jid, message, { priority: true }),
+      }).catch(err => log.warn({ err }, 'Unknown-person name prompt failed'));
+    }
+
     // Group message from non-owner
     await handleGroup(ctx, ownerChatJid || chatJid);
 
@@ -115,8 +126,12 @@ async function handleDmAsOwner(ctx) {
     const { buildMemoryPack } = await import('../brain/memory.js');
 
     const memoryPack = await buildMemoryPack({ personId: ctx.person?.id, messageText: text, isGroup: false });
+    const { getRecentMessages } = await import('../db/repos/messages.js');
+    const { buildConversationHistory } = await import('../util/conversationContext.js');
+    const recentRows = await getRecentMessages(chatJid, 16).catch(() => []);
+    const history = buildConversationHistory(recentRows, { currentWaId: rawMsg?.key?.id, isGroup: false, limit: 12 });
     const systemPrompt = buildSystemPrompt({ toneMode: 'playful', memoryPack, isGroup: false, isOwnerMessage: true });
-    const result = await generateReply(systemPrompt, [], text, true);
+    const result = await generateReply(systemPrompt, history, text, true);
     const parts = result.reply_parts || [];
     const candidate = parts[0] || getFallbackLine('casual', chatJid);
     const guarded = guardOutput(candidate, [], false);

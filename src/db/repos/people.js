@@ -32,30 +32,38 @@ export async function findOrCreatePerson(jid, opts = {}) {
   const { pushName, kind = jid.includes('@lid') ? 'lid' : 'phone', phone = null } = opts;
 
   const existing = await findPersonByJid(jid);
+  const jidPhone = jid?.endsWith('@s.whatsapp.net') ? jid.split('@')[0] : null;
+  const knownPhone = String(phone || jidPhone || '').replace(/\D/g, '') || null;
   if (existing) {
-    // Update last_seen_at and push_name if changed
+    const updates = [];
+    const values = [];
+    let n = 1;
     if (pushName && existing.push_name !== pushName) {
-      await query(
-        'UPDATE people SET push_name = $1, last_seen_at = NOW() WHERE id = $2',
-        [pushName, existing.id]
-      );
-      existing.push_name = pushName;
-    } else {
-      await query('UPDATE people SET last_seen_at = NOW() WHERE id = $1', [existing.id]);
+      updates.push(`push_name = $${n++}`); values.push(pushName); existing.push_name = pushName;
     }
+    // Give every identity a stable usable label. A phone number is the fallback
+    // until the owner supplies a real name; never overwrite an owner-assigned name.
+    if (!existing.display_name && (pushName || knownPhone)) {
+      const fallback = pushName || knownPhone;
+      updates.push(`display_name = $${n++}`); values.push(fallback); existing.display_name = fallback;
+    }
+    updates.push('last_seen_at = NOW()');
+    values.push(existing.id);
+    await query(`UPDATE people SET ${updates.join(', ')} WHERE id = $${n}`, values);
     return { person: existing, created: false };
   }
 
   return withTransaction(async (client) => {
+    const initialLabel = pushName || knownPhone;
     const personRes = await client.query(
-      `INSERT INTO people (push_name, language_pref) VALUES ($1, 'hinglish') RETURNING *`,
-      [pushName || null]
+      `INSERT INTO people (push_name, display_name, language_pref) VALUES ($1, $2, 'hinglish') RETURNING *`,
+      [pushName || null, initialLabel || null]
     );
     const person = personRes.rows[0];
 
     await client.query(
       'INSERT INTO person_identities (person_id, jid, kind, phone) VALUES ($1, $2, $3, $4)',
-      [person.id, jid, kind, phone]
+      [person.id, jid, kind, knownPhone]
     );
 
     return { person, created: true };
@@ -217,10 +225,39 @@ export async function findPeopleByName(name) {
 export async function getRecentPeopleForResolution(limit = 50) {
   const safeLimit = Math.max(1, Math.min(100, Number.parseInt(limit, 10) || 50));
   const result = await query(
-    `SELECT * FROM people
-     ORDER BY last_seen_at DESC NULLS LAST
+    `SELECT p.*,
+            COALESCE((SELECT array_agg(DISTINCT regexp_replace(COALESCE(pi.phone, split_part(pi.jid, '@', 1)), '\\D', '', 'g'))
+                      FROM person_identities pi
+                      WHERE pi.person_id = p.id AND pi.kind = 'phone'), ARRAY[]::text[]) AS phone_numbers
+     FROM people p
+     ORDER BY p.last_seen_at DESC NULLS LAST
      LIMIT $1`,
     [safeLimit]
   );
   return result.rows;
+}
+
+/** Mark a person as having received the one-time owner name prompt. */
+export async function claimNamePrompt(personId) {
+  const result = await query(
+    `UPDATE people SET name_prompted_at = NOW()
+     WHERE id = $1 AND name_prompted_at IS NULL
+       AND (display_name ~ '^[+0-9() -]{7,20}$' OR display_name IS NULL)
+     RETURNING id`,
+    [personId]
+  );
+  return result.rowCount > 0;
+}
+
+/** Return the best available phone number for a person. */
+export async function getPersonPhone(personId) {
+  const result = await query(
+    `SELECT COALESCE(NULLIF(pi.phone, ''), split_part(pi.jid, '@', 1)) AS phone
+     FROM person_identities pi
+     WHERE pi.person_id = $1 AND pi.kind = 'phone'
+     ORDER BY CASE WHEN pi.phone IS NOT NULL AND pi.phone <> '' THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [personId]
+  );
+  return result.rows[0]?.phone ? String(result.rows[0].phone).replace(/\D/g, '') : null;
 }
