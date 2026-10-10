@@ -4,7 +4,7 @@
  * Intent parsing: first regex rules, then model fallback.
  */
 import { getAllGroups, enableGroup, disableGroup, setGroupMode } from '../db/repos/groups.js';
-import { getRecentPeopleForResolution, addOwnerJid } from '../db/repos/people.js';
+import { getRecentPeopleForResolution, getIdentities, addOwnerJid } from '../db/repos/people.js';
 import {
   findOpenApproval, findApprovalByMessageId, decideApproval,
   getOpenApprovals, createApproval, genCode, setCardMessageId,
@@ -21,7 +21,8 @@ import { config } from '../config.js';
 import { getLogger } from '../logger.js';
 import { isExtractionAttempt } from '../brain/guard.js';
 import { getDeflectLine } from '../brain/fallback.js';
-import { parseScheduledMessageCommand, parseScheduleDateTime, formatScheduledIST } from '../util/scheduleTime.js';
+import { parseScheduledMessageCommand, parseSelfReminderCommand, parseScheduleDateTime, formatScheduledIST } from '../util/scheduleTime.js';
+import { isSelfTargetName, scheduleSelfReminder, setPendingReminderDraft, getPendingReminderDraft, clearPendingReminderDraft } from '../skills/reminder.js';
 import { toISTDateString } from '../util/time.js';
 import { isCalendarQuestion } from '../util/calendar.js';
 import { isTimetableQuestion } from '../util/timetableQuery.js';
@@ -144,6 +145,26 @@ export async function handleOwnerMessage(ctx, ownerChatJid) {
     pendingDisambig.delete(senderJid);
   }
 
+  // ── Incomplete schedule follow-up: ask only for the missing field ──
+  const scheduleDraft = getPendingReminderDraft(senderJid);
+  if (scheduleDraft?.source === 'owner-schedule') {
+    if (/^(?:cancel|stop|rehne de|chhod de|cancel reminder)$/i.test(t)) {
+      clearPendingReminderDraft(senderJid);
+      return 'theek hai, scheduling cancel kar di.';
+    }
+    // Explicit new actions should not be swallowed as a missing field.
+    if (parseScheduledMessageCommand(t) || parseSelfReminderCommand(t) || parseGroupControlCommand(t) || isTimetableQuestion(t) || /^(?:status|groups dikha|help)$/i.test(t)) {
+      clearPendingReminderDraft(senderJid);
+    } else {
+      const entities = { ...(scheduleDraft.entities || {}) };
+      if (scheduleDraft.missing === 'target') entities.person = t;
+      else if (scheduleDraft.missing === 'message') entities.text = t;
+      else if (scheduleDraft.missing === 'time') entities.scheduleAtPhrase = t;
+      clearPendingReminderDraft(senderJid);
+      return executeIntent({ intent: 'SCHEDULE_MESSAGE', entities, confidence: 1 }, ctx, ownerChatJid);
+    }
+  }
+
   // ── Approval shortcuts: "D4 yes", "N7 no", etc. ──────────────────
   const approvalMatch = t.match(/^([DNGM]\d+)\s+(yes|no|approve|reject|haan|nahi)(.*)$/i);
   if (approvalMatch) {
@@ -222,6 +243,14 @@ function detectIntentByRules(text) {
     return {
       intent: 'SCHEDULE_MESSAGE',
       entities: { person: scheduled.target, text: scheduled.message, scheduleAtPhrase: scheduled.timePhrase },
+      confidence: 0.98,
+    };
+  }
+  const selfReminder = parseSelfReminderCommand(text);
+  if (selfReminder) {
+    return {
+      intent: 'SCHEDULE_MESSAGE',
+      entities: { person: 'mujhe', text: selfReminder.message, scheduleAtPhrase: selfReminder.timePhrase, selfReminder: true },
       confidence: 0.98,
     };
   }
@@ -581,34 +610,86 @@ async function executeIntent(parsed, ctx, ownerChatJid) {
     }
 
     case 'SCHEDULE_MESSAGE': {
-      if (!entities.person || !entities.text) return 'kisko aur kya bhejna hai? naam aur message dono bata';
+      const selfReminder = entities.selfReminder === true || isSelfTargetName(entities.person);
+      const message = String(entities.text || '').trim();
+      const targetName = String(entities.person || '').trim();
+
+      if (!message) {
+        setPendingReminderDraft(senderJid, {
+          source: 'owner-schedule', missing: 'message',
+          entities: { ...entities, selfReminder, ...(selfReminder ? { person: 'mujhe' } : {}) },
+        });
+        return selfReminder ? 'kis baat ka reminder chahiye? bas woh bata de.' : 'kya message bheju? message ka text bata de.';
+      }
+      if (!selfReminder && !targetName) {
+        setPendingReminderDraft(senderJid, { source: 'owner-schedule', missing: 'target', entities: { ...entities, text: message } });
+        return 'kisko bheju? contact ya group ka naam bata de.';
+      }
+
       const phrase = entities.scheduleAtPhrase || entities.time || entities.datetime || entities.date;
       const runAt = parseScheduleDateTime(phrase || '', {
         now: new Date(), explicitTime: entities.time, explicitDate: entities.date,
       });
-      if (!runAt) return 'kis time bheju? jaise “kal subah 8 baje” ya “aaj 6 pm” bol';
+      if (!runAt) {
+        setPendingReminderDraft(senderJid, {
+          source: 'owner-schedule', missing: 'time',
+          entities: { ...entities, text: message, selfReminder, ...(selfReminder ? { person: 'mujhe' } : {}) },
+        });
+        return selfReminder ? 'kab yaad dilau? jaise kal subah 8 baje.' : 'kis time bheju? jaise kal subah 8 baje ya aaj 6 pm.';
+      }
 
-      const people = await getRecentPeopleForResolution();
+      if (selfReminder) {
+        clearPendingReminderDraft(senderJid);
+        const result = await scheduleSelfReminder({
+          requesterJid: ctx.chatJid,
+          requesterPersonId: ctx.person?.id || null,
+          message,
+          runAt,
+        });
+        return result.reply;
+      }
+
+      const people = await getRecentPeopleForResolution(100);
       const groups = await getAllGroups();
       const target = entities.resolvedTarget
-        ? { match: entities.resolvedTarget.item, type: entities.resolvedTarget.type, ambiguous: false }
-        : resolveTarget(entities.person, people, groups);
-      if (target.ambiguous) {
+        ? { match: entities.resolvedTarget.item, type: entities.resolvedTarget.type, ambiguous: false, candidates: [] }
+        : resolveTarget(targetName, people, groups);
+      if (target.ambiguous || !target.match) {
+        const candidates = target.candidates?.length ? target.candidates : [
+          ...groups.map(item => ({ item: { ...item, __targetType: 'group' }, score: 0 })),
+          ...people.map(item => ({ item: { ...item, __targetType: 'person' }, score: 0 })),
+        ].slice(0, 10);
+        if (!candidates.length) return `“${targetName}” ka contact ya group nahi mila. naam dobara bata de.`;
         const intentForClarification = { ...parsed, entities: { ...entities, scheduledAtISO: runAt.toISOString() } };
-        pendingDisambig.set(senderJid, { type: 'SCHEDULE_MESSAGE', candidates: target.candidates, originalIntent: intentForClarification });
-        return `kaun sa ${entities.person}?\n${formatTargetChoices(target.candidates)}\nnumber ya naam reply kar de`;
+        pendingDisambig.set(senderJid, { type: 'SCHEDULE_MESSAGE', candidates, originalIntent: intentForClarification });
+        return `“${targetName}” ke liye clear match nahi mila. kis target par bheju?\n${formatTargetChoices(candidates)}\nnumber ya naam reply kar de.`;
       }
-      if (!target.match) return `${entities.person} ka clear match nahi mila. naam dobara likh ya target list mein se choose kar.`;
-      const jid = target.type === 'group' ? target.match.jid :
-        (await import('../db/repos/people.js').then(m => m.getIdentities(target.match.id)).catch(() => []))[0]?.jid;
-      if (!jid) return `${entities.person} ka WhatsApp contact nahi mila`;
+
+      let jid = target.type === 'group' ? target.match.jid : null;
+      if (target.type !== 'group') {
+        const identities = await getIdentities(target.match.id).catch(() => []);
+        const preferred = identities.find(identity => String(identity.jid || '').endsWith('@s.whatsapp.net'))
+          || identities.find(identity => identity.kind === 'phone')
+          || identities[0];
+        jid = preferred?.jid || null;
+      }
+      if (!jid) {
+        const candidates = target.candidates?.length ? target.candidates : [];
+        if (candidates.length) {
+          pendingDisambig.set(senderJid, { type: 'SCHEDULE_MESSAGE', candidates, originalIntent: { ...parsed, entities: { ...entities, scheduledAtISO: runAt.toISOString() } } });
+          return `WhatsApp contact ka exact address nahi mila. inmein se choose kar:\n${formatTargetChoices(candidates)}\nnumber ya naam reply kar de.`;
+        }
+        return `${targetName} ka WhatsApp contact nahi mila. kisi aur saved naam se try kar.`;
+      }
 
       const result = await scheduleOrderedMessage({
-        targetName: entities.person, targetJid: jid, message: entities.text,
+        targetName, targetJid: jid, message,
         runAt, verbatim: entities.verbatim,
       });
       if (!result.ok) return result.reply;
-      return `✅ ${target.match.display_name || target.match.push_name || target.match.subject || entities.person} ko *${formatScheduledIST(runAt)}* pe bhejunga.`;
+      clearPendingReminderDraft(senderJid);
+      const label = target.match.subject || target.match.display_name || target.match.push_name || targetName;
+      return `✅ *${label}* ke liye schedule kar diya — ${formatScheduledIST(runAt)} pe bhejunga.`;
     }
 
     case 'MERGE_PEOPLE': {

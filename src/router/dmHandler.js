@@ -27,6 +27,8 @@ import { decide } from '../brain/decision.js';
 import { getLogger } from '../logger.js';
 import { isCalendarQuestion } from '../util/calendar.js';
 import { isPodDataRequest } from '../util/podIntent.js';
+import { parseScheduledMessageCommand, parseSelfReminderCommand, parseScheduleDateTime } from '../util/scheduleTime.js';
+import { isSelfTargetName, scheduleSelfReminder, getPendingReminderDraft, setPendingReminderDraft, clearPendingReminderDraft } from '../skills/reminder.js';
 
 const log = getLogger('router/dmHandler');
 
@@ -95,6 +97,16 @@ export async function handleDm(ctx, sendOwnerCard) {
   if (access.status === 'denied' || access.status === 'revoked') {
     // Silent — blocked user gets nothing (§4.1)
     log.info({ personId: person.id, status: access.status }, 'DM ignored due to access status');
+    return;
+  }
+
+  // ── Approved-user self reminders: private DM only, never arbitrary targets ──
+  const reminderResult = await handlePrivateReminder(ctx);
+  if (reminderResult.handled) {
+    if (reminderResult.reply) {
+      await humanSend(chatJid, reminderResult.reply, { sourceMessage: rawMsg, priority: true });
+      recordReply(person.id, chatJid);
+    }
     return;
   }
 
@@ -223,6 +235,87 @@ export async function handleDm(ctx, sendOwnerCard) {
 
     // ── Step 3: Free chat via LLM ─────────────────────────────────
     await generateDmReply(ctx);
+  }
+}
+
+/**
+ * Handles private self-reminders. A regular user can never name another recipient;
+ * their saved job always targets the exact DM in which they asked.
+ */
+async function handlePrivateReminder(ctx) {
+  const { chatJid, person, text } = ctx;
+  const key = chatJid;
+  const raw = String(text || '').trim();
+  const pending = getPendingReminderDraft(key);
+
+  if (pending?.source === 'dm-self-reminder') {
+    if (/^(?:cancel|stop|rehne de|chhod de|cancel reminder)$/i.test(raw)) {
+      clearPendingReminderDraft(key);
+      return { handled: true, reply: 'theek hai, reminder cancel kar diya.' };
+    }
+    // Let a new explicit reminder replace the incomplete draft.
+    if (!parseScheduledMessageCommand(raw) && !parseSelfReminderCommand(raw)) {
+      const draft = { ...pending };
+      if (draft.missing === 'message') draft.message = raw;
+      else if (draft.missing === 'time') draft.timePhrase = raw;
+      return { handled: true, reply: await finishPrivateReminderDraft(key, draft, ctx) };
+    }
+    clearPendingReminderDraft(key);
+  }
+
+  const namedRequest = parseScheduledMessageCommand(raw);
+  if (namedRequest && !isSelfTargetName(namedRequest.target)) {
+    return {
+      handled: true,
+      reply: 'main tumhe sirf isi private DM mein reminder bhej sakta hoon. kisi aur person ya group ko message schedule karna owner ka permission hai.',
+    };
+  }
+
+  let selfRequest = parseSelfReminderCommand(raw);
+  if (!selfRequest && namedRequest && isSelfTargetName(namedRequest.target)) {
+    selfRequest = { ...namedRequest, selfReminder: true };
+  }
+  if (!selfRequest) return { handled: false, reply: null };
+
+  const draft = {
+    source: 'dm-self-reminder',
+    missing: !String(selfRequest.message || '').trim() ? 'message' : 'time',
+    message: String(selfRequest.message || '').trim(),
+    timePhrase: String(selfRequest.timePhrase || '').trim(),
+  };
+  return { handled: true, reply: await finishPrivateReminderDraft(key, draft, ctx) };
+}
+
+async function finishPrivateReminderDraft(key, draft, ctx) {
+  const message = String(draft.message || '').trim();
+  if (!message) {
+    const next = { ...draft, source: 'dm-self-reminder', missing: 'message' };
+    setPendingReminderDraft(key, next);
+    return 'kis baat ka reminder chahiye? bas woh bata de.';
+  }
+
+  const runAt = parseScheduleDateTime(String(draft.timePhrase || ''), { now: new Date() });
+  if (!runAt) {
+    const next = { ...draft, source: 'dm-self-reminder', message, missing: 'time' };
+    setPendingReminderDraft(key, next);
+    return 'kab yaad dilau? jaise “kal subah 8 baje” ya “aaj 6 pm”.';
+  }
+
+  clearPendingReminderDraft(key);
+  try {
+    const result = await scheduleSelfReminder({
+      requesterJid: ctx.chatJid,
+      requesterPersonId: ctx.person?.id || null,
+      message,
+      runAt,
+    });
+    if (!result.ok && result.missing) {
+      setPendingReminderDraft(key, { ...draft, source: 'dm-self-reminder', missing: result.missing });
+    }
+    return result.reply;
+  } catch (err) {
+    log.error({ err: err?.message, personId: ctx.person?.id }, 'Failed to save private self-reminder');
+    return 'reminder save nahi ho paya, thodi der baad phir try kar.';
   }
 }
 

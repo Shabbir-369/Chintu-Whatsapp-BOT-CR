@@ -145,33 +145,168 @@ export function formatScheduledIST(date) {
   return `${date.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: TZ })} ${date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: TZ })} IST`;
 }
 
-/** Extract a natural-language scheduled-message command before the generic send parser. */
-export function parseScheduledMessageCommand(text) {
-  const raw = String(text || '').trim();
-  const action = '(?:yaad\\s+dila(?:\\s+de)?|yaad\\s+kara(?:\\s+de)?|remind(?:\\s+me)?|message\\s+(?:kar|bhej)|bol\\s+de|bhej\\s+de)';
-  const patterns = [
-    new RegExp(`^(.+?)\\s+ko\\s+(.+?)\\s+${action}\\s+(?:ki\\s+)?(.+)$`, 'i'),
-    new RegExp(`^(.+?)\\s+ko\\s+${action}\\s+(?:ki\\s+)?(.+)$`, 'i'),
-  ];
-  for (let i = 0; i < patterns.length; i++) {
-    const match = raw.match(patterns[i]);
-    if (!match) continue;
-    let target, timePhrase, message;
-    if (i === 0) {
-      target = match[1].trim(); timePhrase = match[2].trim(); message = match[3].trim();
-      if (!hasScheduleTimePhrase(timePhrase)) continue;
-    } else {
-      target = match[1].trim();
-      // Do not treat an ordinary "kal bol de" instruction as scheduled without a clock/daypart.
-      const actionAt = raw.toLowerCase().search(new RegExp(action, 'i'));
-      const beforeAction = raw.slice(0, actionAt);
-      const timeMatch = beforeAction.match(/\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*(?:baje)?|subah|morning|dopahar|afternoon|shaam|sham|evening|raat|night|midnight|noon)\b/i);
-      if (!timeMatch) continue;
-      timePhrase = timeMatch[0]; message = match[2].trim();
+/** Scheduler command grammar shared by owner orders and private self-reminders. */
+const REMINDER_ACTION_SOURCE = '(?:yaad\\s+dila(?:na|ne|do|\\s+de(?:na)?|\\s+dena)?|yaad\\s+kara(?:na|ne|do|\\s+de(?:na)?|\\s+dena)?|remind\\s+me|remind|reminder)';
+const MESSAGE_ACTION_SOURCE = '(?:message\\s+(?:kar|bhej)|bol\\s+de|bhej\\s+de|send)';
+const SCHEDULE_ACTION_SOURCE = `(?:${REMINDER_ACTION_SOURCE}|${MESSAGE_ACTION_SOURCE})`;
+
+function isReminderAction(action) {
+  return /yaad|remind|reminder/i.test(String(action || ''));
+}
+
+function hasClockOrDayPart(text) {
+  return /\b(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|baje|baj[e]?|o'?clock)|\d{1,2}:\d{2}|subah|morning|dopahar|afternoon|shaam|sham|evening|raat|night|midnight|noon)\b/i.test(String(text || ''));
+}
+
+function stripReminderConnective(value) {
+  return String(value || '').trim()
+    .replace(/^(?:(?:ki|ke|that|to|about)\s+)+/i, '')
+    .replace(/^[:,-]\s*/, '')
+    .replace(/^['"“”]|['"“”]$/g, '')
+    .trim();
+}
+
+/** Extract a scheduling phrase at the start of a clause, preserving it verbatim for IST parsing. */
+function extractLeadingSchedulePrefix(value) {
+  const raw = String(value || '').trim().replace(/^(?:ki|to|about|at|on)\s+/i, '');
+  if (!raw) return null;
+  const date = '(?:day after tomorrow|tomorrow|today|kal|aaj|parso|parson|next\\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|20\\d{2}-\\d{1,2}-\\d{1,2})';
+  const clock = "(?:\\d{1,2}(?::\\d{2})?\\s*(?:am|pm|baje|baj[e]?|o[’\']?clock)|\\d{1,2}:\\d{2})";
+  const dayPart = '(?:subah|morning|dopahar|afternoon|shaam|sham|evening|raat|night|midnight|noon)';
+  const phrase = `(?:${date}(?:\\s+(?:at\\s*)?(?:${clock}|${dayPart}))?|(?:at\\s+)?${clock}(?:\\s+${date})?|${dayPart})`;
+  const match = raw.match(new RegExp(`^(${phrase})(?:\\s+)(.+)$`, 'i'));
+  if (!match) return null;
+  return { timePhrase: match[1].trim(), rest: match[2].trim() };
+}
+
+/** Find an explicit time clause at the end of a reminder, e.g. "call mom tomorrow at 8pm". */
+function extractTrailingSchedulePhrase(value) {
+  const raw = String(value || '').trim();
+  const date = '(?:day after tomorrow|tomorrow|today|kal|aaj|parso|parson|next\\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday)';
+  const clock = "(?:\\d{1,2}(?::\\d{2})?\\s*(?:am|pm|baje|baj[e]?|o[’\']?clock)|\\d{1,2}:\\d{2})";
+  const dayPart = '(?:subah|morning|dopahar|afternoon|shaam|sham|evening|raat|night|midnight|noon)';
+  const timeClause = `(?:${date}(?:\\s+(?:at\\s*)?(?:${clock}|${dayPart}))?|(?:at\\s+)?${clock}(?:\\s+${date})?|${dayPart})`;
+  const match = raw.match(new RegExp(`^(.+?)\\s+(${timeClause})$`, 'i'));
+  if (!match || !hasScheduleTimePhrase(match[2])) return null;
+  return { message: stripReminderConnective(match[1]), timePhrase: match[2].trim() };
+}
+
+function parseNamedScheduleCore(raw, fallbackTime = '') {
+  // Form: "Rohan ko kal 8 baje yaad dilana ki ..." or "group ko 6 pm message kar ...".
+  const beforeAction = raw.match(new RegExp(`^(.+?)\\s+ko\\s+(.+?)\\s+(${SCHEDULE_ACTION_SOURCE})\\s+(?:ki\\s+)?(.+)$`, 'i'));
+  if (beforeAction) {
+    const [, target, timePhrase, action, content] = beforeAction;
+    if (hasScheduleTimePhrase(timePhrase) && (isReminderAction(action) || hasClockOrDayPart(timePhrase))) {
+      return { target: target.trim(), timePhrase: timePhrase.trim(), message: stripReminderConnective(content) };
     }
-    message = message.replace(/^\s*(?:ki|that|to)\s+/i, '').replace(/^['"“”]|['"“”]$/g, '').trim();
-    if (!target || !message) continue;
-    return { target, timePhrase, message };
+    if (isReminderAction(action)) {
+      return { target: target.trim(), timePhrase: fallbackTime, message: stripReminderConnective(content) };
+    }
+  }
+
+  // Form: "Rohan ko yaad dilana kal 8 baje ki ..." or "Rohan ko message kar kal 8 baje ...".
+  const afterAction = raw.match(new RegExp(`^(.+?)\\s+ko\\s+(${SCHEDULE_ACTION_SOURCE})(?:\\s+(.*))?$`, 'i'));
+  if (!afterAction) return null;
+  const [, target, action, afterRaw = ''] = afterAction;
+  const after = stripReminderConnective(afterRaw);
+  const leading = extractLeadingSchedulePrefix(after);
+  if (leading && (isReminderAction(action) || hasClockOrDayPart(leading.timePhrase))) {
+    return { target: target.trim(), timePhrase: leading.timePhrase, message: stripReminderConnective(leading.rest) };
+  }
+  const trailing = extractTrailingSchedulePhrase(after);
+  if (trailing && (isReminderAction(action) || hasClockOrDayPart(trailing.timePhrase))) {
+    return { target: target.trim(), timePhrase: trailing.timePhrase, message: trailing.message };
+  }
+  if (isReminderAction(action)) {
+    return { target: target.trim(), timePhrase: fallbackTime, message: after };
+  }
+  if (fallbackTime && hasClockOrDayPart(fallbackTime)) {
+    return { target: target.trim(), timePhrase: fallbackTime, message: after };
   }
   return null;
+}
+
+/**
+ * Parse owner-ordered scheduled messages/reminders. The target may be a known person
+ * or a WhatsApp group; resolution and ambiguity confirmation happen in ownerConsole.
+ */
+export function parseScheduledMessageCommand(text) {
+  const raw = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!raw) return null;
+
+  // Support time-first phrasing: "kal 8 baje Rohan ko message kar ki ...".
+  const leading = extractLeadingSchedulePrefix(raw);
+  if (leading) {
+    const nested = parseNamedScheduleCore(leading.rest, leading.timePhrase);
+    if (nested && (isReminderAction(raw) || hasClockOrDayPart(leading.timePhrase))) {
+      return { ...nested, timePhrase: leading.timePhrase };
+    }
+  }
+  return parseNamedScheduleCore(raw, '');
+}
+
+/**
+ * Parse a reminder that should go to the requesting user's own DM.
+ * Supports Hinglish and English, with the time before/after the reminder action.
+ * An incomplete reminder is still returned so callers can ask for only the missing field.
+ */
+export function parseSelfReminderCommand(text) {
+  const raw = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!raw) return null;
+  const explicitSelfStart = /^(?:(?:please|can you|could you)\s+)*(?:mujhe|mujhko|me\b|remind me\b|yaad\s+dila|yaad\s+kara|reminder\b)/i.test(raw);
+  const englishReminder = raw.match(/^(?:(?:please|can you|could you)\s+)*remind me\b(.*)$/i);
+  if (englishReminder && !/^(?:\s*(?:to|about|at|on|today|aaj|tomorrow|kal|parso|parson|day after tomorrow|next\s+|\d|subah|morning|dopahar|afternoon|shaam|sham|evening|raat|night|midnight|noon))/i.test(englishReminder[1])) return null;
+  const leadingClause = extractLeadingSchedulePrefix(raw);
+  const startsAfterTime = Boolean(leadingClause && /^(?:mujhe|mujhko|me\b|yaad\s+dila|yaad\s+kara|remind me\b)/i.test(leadingClause.rest));
+  if (!explicitSelfStart && !startsAfterTime) return null;
+  const actionRx = new RegExp(`\\b${REMINDER_ACTION_SOURCE}\\b`, 'i');
+  const actionMatch = actionRx.exec(raw);
+  if (!actionMatch) return null;
+
+  // A named person/group command is handled by parseScheduledMessageCommand, never as self.
+  const beforeRaw = raw.slice(0, actionMatch.index).trim();
+  if (/\b.+\s+ko\s*$/i.test(beforeRaw) && !/^(?:mujhe|mujhko|me)\b/i.test(beforeRaw)) return null;
+
+  let before = beforeRaw
+    .replace(/^(?:please\s+)?(?:mujhe|mujhko|me)\b\s*/i, '')
+    .replace(/\s+(?:mujhe|mujhko|me)\s*$/i, '')
+    .trim();
+  let after = stripReminderConnective(raw.slice(actionMatch.index + actionMatch[0].length));
+  let timePhrase = '';
+  let message = '';
+
+  // If the task text comes before the action and the time is the final clause,
+  // retain both instead of treating the whole sentence as the time.
+  const trailingBefore = extractTrailingSchedulePhrase(before);
+  if (trailingBefore) {
+    const dateOnlyPrefix = /^(?:day after tomorrow|tomorrow|today|kal|aaj|parso|parson|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(trailingBefore.message);
+    timePhrase = dateOnlyPrefix ? `${trailingBefore.message} ${trailingBefore.timePhrase}` : trailingBefore.timePhrase;
+    message = dateOnlyPrefix ? '' : trailingBefore.message;
+  } else if (before && hasScheduleTimePhrase(before)) {
+    timePhrase = before;
+  }
+
+  const leadingAfter = extractLeadingSchedulePrefix(after);
+  if (!timePhrase && leadingAfter) {
+    timePhrase = leadingAfter.timePhrase;
+    message = [message, stripReminderConnective(leadingAfter.rest)].filter(Boolean).join(' ').trim();
+  } else {
+    const trailingAfter = extractTrailingSchedulePhrase(after);
+    if (!timePhrase && trailingAfter) {
+      timePhrase = trailingAfter.timePhrase;
+      message = [message, trailingAfter.message].filter(Boolean).join(' ').trim();
+    } else if (after) {
+      message = [message, after].filter(Boolean).join(' ').trim();
+    }
+  }
+
+  // English: "remind me to submit the form tomorrow at 8am".
+  if (!timePhrase && before && !hasScheduleTimePhrase(before)) {
+    message = [before, message].filter(Boolean).join(' ').trim();
+  }
+  message = stripReminderConnective(message);
+
+  // If time appeared after the action but before the message, it has already been split.
+  // If the action itself is at the beginning and no task text follows, let the caller ask.
+  return { target: 'mujhe', timePhrase, message, selfReminder: true };
 }

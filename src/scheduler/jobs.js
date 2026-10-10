@@ -5,6 +5,7 @@
 import { getDueJobs, markJobDone, markJobFailed, retryJob } from '../db/repos/timetable.js';
 import { humanSend } from '../gateway/outbox.js';
 import { getLogger } from '../logger.js';
+import { isValidSelfReminderPayload } from '../util/reminderPolicy.js';
 
 const log = getLogger('scheduler/jobs');
 let processingDueJobs = false;
@@ -57,6 +58,15 @@ async function executeJob(job) {
       if (!targetJid || !message) throw new Error('Missing targetJid or message');
       const sent = await humanSend(targetJid, message, { priority: true });
       if (!sent?.key?.id) throw new Error('WhatsApp send did not confirm delivery');
+      break;
+    }
+
+    case 'self_reminder': {
+      const payload = job.payload || {};
+      // Defence in depth: a self-reminder may only ever reach the requester in a private DM.
+      if (!isValidSelfReminderPayload(payload)) throw new Error('Rejected invalid self-reminder recipient');
+      const sent = await humanSend(payload.targetJid, `⏰ *Reminder*\n${payload.message}`, { priority: true });
+      if (!sent?.key?.id) throw new Error('WhatsApp reminder send did not confirm delivery');
       break;
     }
 
