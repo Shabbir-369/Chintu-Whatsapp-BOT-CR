@@ -12,11 +12,14 @@ import { toISTDateString, getISTHour, jitter, sleep } from '../util/time.js';
 import { config } from '../config.js';
 import { getLogger } from '../logger.js';
 import { getDailyStarterWindows, isStarterWindowDue, isNearConfiguredTime } from '../util/starterPlan.js';
+import { canStartConversationInMode } from '../util/schedulerPlan.js';
 
 const log = getLogger('skills/starter');
 
 // Ignore streak tracking
 const ignoreStreaks = new Map(); // groupJid -> count
+const pendingStarterReplies = new Map(); // groupJid -> send timestamp
+const REPLY_WINDOW_MS = 30 * 60 * 1000;
 let starterRunInProgress = false;
 
 /**
@@ -28,6 +31,7 @@ export async function tryConversationStarters(force = false) {
   if (starterRunInProgress) return; // scheduler ticks must never duplicate a starter run
 
   const now = new Date();
+  settleExpiredStarterReplies(now.getTime());
   const hour = getISTHour(now);
 
   // Only between 12:00 and 22:00 IST (unless forced by owner)
@@ -51,6 +55,10 @@ export async function tryConversationStarters(force = false) {
 }
 
 async function tryStarterForGroup(group, today, now, force = false) {
+  // Unsolicited starters belong to ambient groups only. A manual owner force
+  // may explicitly request one in another enabled mode.
+  if (!canStartConversationInMode(group, force)) return;
+
   // Check daily plan (max 2 starters per day)
   const startedToday = await getDailyEventCount(today, group.jid, 'starter');
   const maxStarters = config.STARTERS_PER_DAY;
@@ -95,8 +103,13 @@ async function tryStarterForGroup(group, today, now, force = false) {
   const starter = await generateStarter(group, specialOccasion);
   if (!starter) return;
 
-  await humanSend(group.jid, starter);
+  const sent = await humanSend(group.jid, starter);
+  if (!sent?.key?.id) {
+    log.warn({ groupJid: group.jid }, 'Conversation starter was not confirmed; it will remain eligible for retry');
+    return;
+  }
   await recordDailyEvent(today, group.jid, 'starter');
+  pendingStarterReplies.set(group.jid, Date.now());
   await touchGroupBotAt(group.jid);
 
   log.info({ groupJid: group.jid, forced: force }, 'Conversation starter sent');
@@ -146,9 +159,29 @@ export function recordStarterIgnored(groupJid) {
   ignoreStreaks.set(groupJid, current + 1);
 }
 
-/**
- * Reset ignore streak when group responds.
- */
+/** Track a real group message as a response when it arrives within 30 minutes. */
+export function recordStarterActivity(groupJid, at = Date.now()) {
+  const sentAt = pendingStarterReplies.get(groupJid);
+  if (sentAt == null) return false;
+  pendingStarterReplies.delete(groupJid);
+  if (at - sentAt <= REPLY_WINDOW_MS) {
+    resetStarterStreak(groupJid);
+    return true;
+  }
+  recordStarterIgnored(groupJid);
+  return false;
+}
+
+function settleExpiredStarterReplies(now = Date.now()) {
+  for (const [groupJid, sentAt] of pendingStarterReplies) {
+    if (now - sentAt >= REPLY_WINDOW_MS) {
+      pendingStarterReplies.delete(groupJid);
+      recordStarterIgnored(groupJid);
+    }
+  }
+}
+
+/** Reset ignore streak after the group responds to a starter. */
 export function resetStarterStreak(groupJid) {
   ignoreStreaks.set(groupJid, 0);
 }

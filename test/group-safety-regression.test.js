@@ -19,7 +19,8 @@ test('mute is checked before owner messages are processed', () => {
 });
 
 test('trigger mode filters unaddressed messages before special handlers', () => {
-  assert.match(groupHandler, /grpRow\?\.mode === 'trigger'[\s\S]{0,500}if \(!mentioned && !named && !ctx\.quotedFromBot\) return/);
+  assert.match(groupHandler, /grpRow\?\.mode === 'trigger'[\s\S]{0,180}if \(!isExplicitlyTriggered\(ctx\)\) return/);
+  assert.match(groupHandler, /function isExplicitlyTriggered\(ctx\)/);
 });
 
 test('ambient mode favors replies to substantive messages', () => {

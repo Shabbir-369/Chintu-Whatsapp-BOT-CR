@@ -10,13 +10,14 @@ import { runNightlyMemory } from '../brain/memory.js';
 import { expireOldApprovals } from '../db/repos/approvals.js';
 import { deleteOldMessages } from '../db/repos/messages.js';
 import { cleanOldJobs, cleanOldMassBunkResults, createJob, getDailyEventCount } from '../db/repos/timetable.js';
-import { toISTDateString, getISTHour, isQuietHours } from '../util/time.js';
+import { toISTDateString, getISTHour } from '../util/time.js';
+import { shouldRunMorningWindow } from '../util/schedulerPlan.js';
 import { config } from '../config.js';
 import { getLogger } from '../logger.js';
 
 const log = getLogger('scheduler/tick');
 
-let morningScheduled = false;
+let morningRunInProgress = false;
 let tickRunning = false;
 let lastMorningDate = '';
 let lastNightlyDate = '';
@@ -47,10 +48,22 @@ async function tick() {
 
   try {
     // ── Morning message check ─────────────────────────────────────────
-    const [mh, mm] = config.MORNING_TIME.split(':').map(Number);
-    if (hour === mh && minute >= mm && minute <= mm + 15 && lastMorningDate !== today) {
-      lastMorningDate = today;
-      sendMorningMessages().catch(err => log.error({ err }, 'Morning messages failed'));
+    // Catch up if the process starts/restarts shortly after the configured
+    // time. Mark the date only after every eligible group's send succeeds;
+    // completed groups are deduplicated in daily_events if a retry is needed.
+    if (!morningRunInProgress && shouldRunMorningWindow(now, lastMorningDate, config.MORNING_TIME, 180)) {
+      morningRunInProgress = true;
+      sendMorningMessages()
+        .then(result => {
+          if (result?.failed === 0) {
+            lastMorningDate = today;
+            log.info({ date: today, sent: result.sent, skipped: result.skipped }, 'Morning schedule completed');
+          } else {
+            log.warn({ date: today, sent: result?.sent, failed: result?.failed }, 'Morning schedule incomplete; will retry eligible groups');
+          }
+        })
+        .catch(err => log.error({ err }, 'Morning messages failed'))
+        .finally(() => { morningRunInProgress = false; });
     }
 
     // ── Process due jobs ──────────────────────────────────────────────

@@ -16,7 +16,9 @@ import { recordReply, recordGroupReply } from '../policy/limits.js';
 import { touchGroupBotAt, getGroup } from '../db/repos/groups.js';
 import { writeAuditLog } from '../db/repos/timetable.js';
 import { config, botAliases } from '../config.js';
+import { shouldReactInsteadOfReply } from '../util/reactionFallback.js';
 import { getLogger } from '../logger.js';
+import { recordStarterActivity } from '../skills/starter.js';
 
 const log = getLogger('router/groupHandler');
 
@@ -35,6 +37,8 @@ export async function handleGroup(ctx, ownerChatJid) {
   // including when the owner sends a message there. Manage/unmute it in DM.
   const initialGroup = await getGroup(chatJid).catch(() => null);
   if (initialGroup?.mode === 'mute' || initialGroup?.enabled === false) return;
+  // A member message within 30 minutes counts as engagement with a pending starter.
+  recordStarterActivity(chatJid);
 
   // Alert the owner when a non-owner probes for hidden/internal information.
   if (!isOwner && text && ownerChatJid) {
@@ -53,8 +57,13 @@ export async function handleGroup(ctx, ownerChatJid) {
     return;
   }
 
-  // Non-text, non-owner messages (stickers, reactions, etc.): ignore
-  if (!text) return;
+  // If an ambient group message has no text, react instead of silently ignoring it.
+  // Incoming reactions are excluded to prevent reaction loops; mute/trigger rules
+  // are enforced by reactIfNoReply.
+  if (!text) {
+    await reactIfNoReply(ctx, initialGroup, ctx.kind === 'sticker' ? 'sticker_no_reply' : 'no_text');
+    return;
+  }
 
   // Burst handling (§9.4): 2-5 messages within 8 seconds → DEFER
   const burstKey = `${chatJid}:${ctx.senderJid}`;
@@ -105,11 +114,7 @@ async function processGroupMessage(ctx, ownerChatJid) {
     // Trigger mode means no unsolicited group replies: only process messages
     // that mention the bot, use its alias, or reply to one of its messages.
     if (grpRow?.mode === 'trigger') {
-      const lower = String(text || '').toLowerCase();
-      const botNumber = config.PAIR_NUMBER.replace(/\D/g, '');
-      const mentioned = (ctx.mentions || []).some(m => String(m).replace(/\D/g, '').includes(botNumber));
-      const named = botAliases.some(alias => alias && lower.includes(alias));
-      if (!mentioned && !named && !ctx.quotedFromBot) return;
+      if (!isExplicitlyTriggered(ctx)) return;
     }
 
     // Deterministic group privacy guard: never let the LLM receive attendance
@@ -148,6 +153,7 @@ async function processGroupMessage(ctx, ownerChatJid) {
 
     switch (decision.action) {
       case 'IGNORE':
+        await reactIfNoReply(ctx, grpRow, decision.reason);
         return;
 
       case 'REACT': {
@@ -240,6 +246,31 @@ async function processGroupMessage(ctx, ownerChatJid) {
   }
 }
 
+function isExplicitlyTriggered(ctx) {
+  const lower = String(ctx.text || '').toLowerCase();
+  const botNumber = config.PAIR_NUMBER.replace(/\D/g, '');
+  const mentioned = (ctx.mentions || []).some(m => String(m).replace(/\D/g, '').includes(botNumber));
+  const named = botAliases.some(alias => alias && lower.includes(alias));
+  return mentioned || named || !!ctx.quotedFromBot;
+}
+
+async function reactIfNoReply(ctx, groupRow, reason) {
+  if (!shouldReactInsteadOfReply({
+    ctx,
+    groupRow,
+    reason,
+    explicitlyTriggered: isExplicitlyTriggered(ctx),
+  })) return false;
+
+  try {
+    await sendReaction(ctx.chatJid, pickReactionEmoji(ctx.text || ''), ctx.rawMsg.key);
+    return true;
+  } catch (err) {
+    log.warn({ err, chatJid: ctx.chatJid?.slice(0, 12) }, 'Silent-message reaction failed');
+    return false;
+  }
+}
+
 async function generateGroupReply(ctx, toneMode, decision, ownerChatJid) {
   const { chatJid, person, text, rawMsg, isOwner } = ctx;
 
@@ -288,6 +319,8 @@ async function generateGroupReply(ctx, toneMode, decision, ownerChatJid) {
         await humanSend(chatJid, ok ? cleaned : getFallbackLine('casual', chatJid), { sourceMessage: rawMsg });
         recordGroupReply(chatJid);
         await touchGroupBotAt(chatJid);
+      } else {
+        await reactIfNoReply(ctx, await getGroup(chatJid).catch(() => null), 'llm_silence');
       }
       return;
     }
@@ -303,6 +336,8 @@ async function generateGroupReply(ctx, toneMode, decision, ownerChatJid) {
         await humanSend(chatJid, ok ? cleaned : getFallbackLine('defender', chatJid), { sourceMessage: rawMsg });
         recordGroupReply(chatJid);
         await touchGroupBotAt(chatJid);
+      } else {
+        await reactIfNoReply(ctx, await getGroup(chatJid).catch(() => null), 'llm_silence');
       }
       return;
     }
@@ -317,7 +352,10 @@ async function generateGroupReply(ctx, toneMode, decision, ownerChatJid) {
 
     // Guard and send each part (§15.5)
     const parts = result.reply_parts || [];
-    if (parts.length === 0) return; // LLM chose silence
+    if (parts.length === 0) {
+      await reactIfNoReply(ctx, await getGroup(chatJid).catch(() => null), 'llm_silence');
+      return; // LLM chose silence; acknowledge with a reaction when permitted
+    }
 
     let sent = false;
     for (const part of parts.slice(0, 2)) {

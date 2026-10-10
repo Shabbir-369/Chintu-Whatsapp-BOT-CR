@@ -13,6 +13,7 @@ import { humanSend } from '../gateway/outbox.js';
 import { toISTDateString, getISTWeekday, jitter, sleep } from '../util/time.js';
 import { config } from '../config.js';
 import { getLogger } from '../logger.js';
+import { composeMorningMessage, extractSavageLine, pickMorningFallbackLine } from '../util/schedulerPlan.js';
 
 const log = getLogger('skills/morning');
 
@@ -23,61 +24,56 @@ export async function sendMorningMessages() {
   const now = new Date();
   const today = toISTDateString(now);
   const weekday = getISTWeekday(now);
-
   const groups = await getEnabledGroups();
 
-  for (const group of groups) {
+  // Jitter is per group, not sequential across all groups. Parallelising the
+  // independent work keeps a large group list from drifting hours past morning.
+  const outcomes = await Promise.all(groups.map(async group => {
     try {
-      await sendMorningToGroup(group, today, weekday, now);
+      return { groupJid: group.jid, status: await sendMorningToGroup(group, today, weekday, now) };
     } catch (err) {
       log.error({ err, groupJid: group.jid }, 'Morning message failed for group');
+      return { groupJid: group.jid, status: 'failed' };
     }
-  }
+  }));
+
+  const summary = {
+    total: groups.length,
+    sent: outcomes.filter(result => result.status === 'sent').length,
+    skipped: outcomes.filter(result => result.status === 'skipped').length,
+    failed: outcomes.filter(result => result.status === 'failed').length,
+  };
+  log.info(summary, 'Morning messages run finished');
+  return summary;
 }
 
-/**
- * Send morning message to a specific group.
- */
+/** Send a morning message once to one group; throw on send/persistence errors so scheduler can retry. */
 async function sendMorningToGroup(group, today, weekday, now) {
-  // Check if already sent today
   const count = await getDailyEventCount(today, group.jid, 'morning');
-  if (count > 0) {
+  if (count > 0 || group.last_morning_date === today) {
     log.info({ groupJid: group.jid }, 'Morning message already sent today');
-    return;
+    return 'skipped';
   }
 
-  // Also check last_morning_date
-  if (group.last_morning_date === today) return;
+  // Per-group jitter within the configured twelve-minute window.
+  await sleep(jitter(12 * 60 * 1000));
 
-  // Random jitter: 0-12 minutes so not all groups get it at the same time
-  const jitterMs = jitter(12 * 60 * 1000);
-  await sleep(jitterMs);
-
-  // Assemble facts
   const dayData = await getDayTimetable(now, group.jid);
   const timetableText = formatTimetable(dayData);
-
-  // Get group profile and recent morning messages
   const [groupProfile, recentMornings] = await Promise.all([
     getGroupProfile(group.jid),
     getLastMorningMessages(group.jid),
   ]);
 
-  // Sunday / holiday: just a short line, no timetable
-  if (weekday === 0 || dayData.holiday) {
-    const msg = await generateMorningLine(timetableText, groupProfile, recentMornings, true);
-    await humanSend(group.jid, msg);
-    await recordDailyEvent(today, group.jid, 'morning');
-    await setLastMorningDate(group.jid, today);
-    return;
-  }
+  const isHolidayOrSunday = weekday === 0 || !!dayData.holiday;
+  const fullMsg = await generateMorningLine(timetableText, groupProfile, recentMornings, isHolidayOrSunday);
+  const sent = await humanSend(group.jid, fullMsg);
+  if (!sent?.key?.id) throw new Error('WhatsApp did not confirm morning message delivery');
 
-  // Build LLM prompt for Chintu voice
-  const fullMsg = await generateMorningLine(timetableText, groupProfile, recentMornings, false);
-  await humanSend(group.jid, fullMsg);
   await recordDailyEvent(today, group.jid, 'morning');
   await setLastMorningDate(group.jid, today);
   log.info({ groupJid: group.jid }, 'Morning message sent');
+  return 'sent';
 }
 
 /**
@@ -89,6 +85,7 @@ async function sendMorningToGroup(group, today, weekday, now) {
  * @returns {Promise<string>}
  */
 async function generateMorningLine(timetableText, groupProfile, recentMornings, isHolidayOrSunday) {
+  const fallbackLine = pickMorningFallbackLine(recentMornings);
   try {
     const recentLines = recentMornings.map(m => m.text).join('\n');
     const systemPrompt = buildSystemPrompt({
@@ -98,24 +95,18 @@ async function generateMorningLine(timetableText, groupProfile, recentMornings, 
       isGroup: true,
     });
 
+    // The schedule is formatted by code and never delegated to the model.
+    // Ask for exactly one line so a model response cannot duplicate/change facts.
     const userMsg = isHolidayOrSunday
-      ? 'Write a short 1-line morning message for the group. It is a holiday or Sunday. No timetable. Be funny/savage. Different from these recent ones:\n' + recentLines
-      : `Write the morning timetable message. Include the timetable block below EXACTLY as given (never change times/rooms/faculty), then add one savage/funny line. Be different from recent:\n${recentLines}\n\nTIMETABLE:\n${timetableText}`;
+      ? `Write exactly ONE short, fresh, witty/deep savage morning line for a college group. It is a Sunday or holiday; do not invent events or mention a timetable. No heading, no list. Avoid these recent messages:\n${recentLines}`
+      : `Write exactly ONE short, fresh, witty and slightly deep savage line to append under an already-formatted timetable. Do NOT repeat, rewrite, summarize, or output any timetable/date/class/room/faculty. No heading, no list. Context only (never repeat it):\n${timetableText}\n\nAvoid repeating these recent messages:\n${recentLines}`;
 
     const result = await generateReply(systemPrompt, [], userMsg);
-    const parts = result.reply_parts || [];
-    if (parts.length > 0) {
-      // For morning messages, combine the timetable block + LLM savage line
-      if (!isHolidayOrSunday) {
-        return `${timetableText}\n\n${parts[0]}`;
-      }
-      return parts[0];
-    }
+    const raw = (result.reply_parts || []).join('\n');
+    const line = extractSavageLine(raw, timetableText);
+    if (line) return composeMorningMessage(timetableText, line, isHolidayOrSunday);
   } catch (err) {
-    log.warn({ err }, 'LLM morning message failed, using timetable only');
+    log.warn({ err }, 'LLM morning line failed; using unique fallback line');
   }
-
-  // Fallback: just the timetable
-  if (isHolidayOrSunday) return 'chhutti hai aaj. enjoy 🎉';
-  return timetableText;
+  return composeMorningMessage(timetableText, fallbackLine, isHolidayOrSunday);
 }
