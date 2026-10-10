@@ -3,20 +3,19 @@
  * Owner intent parsing and command execution. §11.1, §11.2, §11.4, §11.5.
  * Intent parsing: first regex rules, then model fallback.
  */
-import { getAllGroups, enableGroup, disableGroup, setGroupMode, getGroup } from '../db/repos/groups.js';
-import { findPeopleByName, getPersonById, addOwnerJid, isOwnerJid } from '../db/repos/people.js';
+import { getAllGroups, enableGroup, disableGroup, setGroupMode } from '../db/repos/groups.js';
+import { getRecentPeopleForResolution, addOwnerJid } from '../db/repos/people.js';
 import {
   findOpenApproval, findApprovalByMessageId, decideApproval,
   getOpenApprovals, createApproval, genCode, setCardMessageId,
   getDmAccess, setDmAccess,
 } from '../db/repos/approvals.js';
-import { setDisplayName } from '../db/repos/people.js';
 import { executeNameDecision, assignNameDirectly } from '../skills/naming.js';
-import { addDayNote, setSetting, getSetting, writeAuditLog } from '../db/repos/timetable.js';
-import { scheduleOrderedMessage, resolveTarget, canSendFirstContact, recordFirstContact } from '../skills/sendOrder.js';
+import { addDayNote, setSetting } from '../db/repos/timetable.js';
+import { scheduleOrderedMessage, resolveTarget } from '../skills/sendOrder.js';
 import { buildIntentParserPrompt } from '../brain/persona.js';
 import { parseOwnerIntent } from '../brain/llm.js';
-import { fuzzyMatch, formatDisambig, scoreAll } from '../util/fuzzy.js';
+import { fuzzyMatch, resolveDisambigChoice } from '../util/fuzzy.js';
 import { runMassBunkAnalysis } from '../skills/massBunk.js';
 import { config } from '../config.js';
 import { getLogger } from '../logger.js';
@@ -26,7 +25,10 @@ import { parseScheduledMessageCommand, parseScheduleDateTime, formatScheduledIST
 import { toISTDateString } from '../util/time.js';
 import { isCalendarQuestion } from '../util/calendar.js';
 import { isTimetableQuestion } from '../util/timetableQuery.js';
-import { parseDisableGroupCommand } from '../util/groupCommand.js';
+import { parseGroupControlCommand } from '../util/groupCommand.js';
+import { findGroupTarget } from '../util/groupResolver.js';
+import { findPersonTarget } from '../util/personResolver.js';
+import { isPodDataRequest, isPodLinkCommand } from '../util/podIntent.js';
 
 const log = getLogger('router/ownerConsole');
 
@@ -62,22 +64,17 @@ export async function handleOwnerMessage(ctx, ownerChatJid) {
   if (isExtractionAttempt(t)) return getDeflectLine(ownerChatJid);
 
   // ── Pod link session continuation (MUST be before intent engine) ──
-  // ONLY two things route to link flow:
-  //   1. There is an active link session (any step) → continue it
-  //   2. User sends an explicit link command ("!link", "link pod", etc.)
-  // Broad topics like "attendance" or "bunk" do NOT start the link flow here —
-  // they are handled below in the Pod data queries block.
+  // An active session continues; explicit link commands and unlinked Pod-data
+  // requests such as "attendance bata" start directly at the email step.
   {
     const { handleLinkFlow } = await import('../skills/pod/link.js');
     const { getPodLinkSession } = await import('../db/repos/pod.js');
     const linkSession = await getPodLinkSession(ctx.person?.id).catch(() => null);
 
-    const isExplicitLinkTrigger =
-      tl === '!link' ||
-      tl === 'link pod' ||
-      /\b(pod link|link account|connect pod|pod connect)\b/.test(tl);
+    const isExplicitLinkTrigger = isPodLinkCommand(tl);
+    const isDataRequest = isPodDataRequest(tl);
 
-    if (linkSession || isExplicitLinkTrigger) {
+    if (linkSession || isExplicitLinkTrigger || isDataRequest) {
       const res = await handleLinkFlow(ctx.person?.id, text);
       if (res.handled) {
         return res.reply || null;
@@ -125,10 +122,9 @@ export async function handleOwnerMessage(ctx, ownerChatJid) {
         }
       }
     } else {
-      // Not linked — suggest linking when they ask for data
-      if (/\b(meri attendance|attendance|bunk|marks|grade|pod data|link karo)\b/i.test(tl) &&
-          !/status|group|message|send|schedule|notice|holiday|timetable/i.test(tl)) {
-        return 'pehle pod link karna hoga. "link pod" bol ya "!link" bhej';
+      // Normally the automatic-link path above handles this before reaching the fallback.
+      if (isPodDataRequest(tl) && !/status|group|message|send|schedule|notice|holiday|timetable/i.test(tl)) {
+        return 'apna Medi-Caps Pod login email bhej — linking wahi se start karte hain. Agar link flow active nahi hua toh ek baar “link pod” bhej.';
       }
     }
   }
@@ -136,7 +132,16 @@ export async function handleOwnerMessage(ctx, ownerChatJid) {
   // ── Check pending disambiguation ──────────────────────────────────
   const pending = pendingDisambig.get(senderJid);
   if (pending) {
-    return handleDisambigReply(senderJid, t, pending, ownerChatJid, ctx);
+    if (/^(?:cancel|stop|rehne de|chhod de|forget it)$/i.test(t)) {
+      pendingDisambig.delete(senderJid);
+      return 'theek hai, selection cancel kar di.';
+    }
+    // A fresh command takes priority over a pending choice; don't accidentally
+    // interpret it as a group/person name and execute the wrong action.
+    if (!parseGroupControlCommand(t)) {
+      return handleDisambigReply(senderJid, t, pending, ownerChatJid, ctx);
+    }
+    pendingDisambig.delete(senderJid);
   }
 
   // ── Approval shortcuts: "D4 yes", "N7 no", etc. ──────────────────
@@ -196,18 +201,10 @@ export async function handleOwnerMessage(ctx, ownerChatJid) {
 function detectIntentByRules(text) {
   const t = text.toLowerCase().trim();
 
-  // Enable group
-  if (/^(enable|start|chalu kar|band mat kar|is group mein bol)\b/.test(t) ||
-      /\b(group enable|enable group|group chalu)\b/.test(t)) {
-    const groupName = t.replace(/^(enable|start|chalu kar|group enable|enable group|group chalu)\s*/i, '').trim();
-    return { intent: 'ENABLE_GROUP', entities: { group: groupName || null }, confidence: 0.9 };
-  }
-
-  // Disable/mute a group from natural language, including 'stop talking in ... group'.
-  const disableTarget = parseDisableGroupCommand(text);
-  if (disableTarget !== null) {
-    return { intent: 'DISABLE_GROUP', entities: { group: disableTarget || null }, confidence: 0.93 };
-  }
+  // One parser handles enable/unmute, mute/stop-talking, and every mode change.
+  // Missing or uncertain targets are resolved through the same numbered-choice flow.
+  const groupControl = parseGroupControlCommand(text);
+  if (groupControl) return groupControl;
 
   // Status
   if (/^status$|^kya chal raha|^sab theek/.test(t)) {
@@ -272,12 +269,6 @@ function detectIntentByRules(text) {
     return { intent: 'FORGET_PERSON', entities: { person: name }, confidence: 0.85 };
   }
 
-  // Set mode
-  const modeMatch = t.match(/^(?:(.+?)\s+mein\s+)?(ambient|trigger|mute)\s+mode/i);
-  if (modeMatch) {
-    return { intent: 'SET_MODE', entities: { group: modeMatch[1]?.trim() || null, mode: modeMatch[2].toLowerCase() }, confidence: 0.9 };
-  }
-
   // List groups
   if (/groups dikha|kaun kaun se groups/.test(t)) {
     return { intent: 'LIST_GROUPS', entities: {}, confidence: 0.95 };
@@ -312,6 +303,66 @@ function detectIntentByRules(text) {
   return null;
 }
 
+function formatGroupChoices(candidates) {
+  return candidates.map((c, i) => {
+    const item = c.item || {};
+    const label = item.subject || item.display_name || item.push_name || item.name || 'unknown';
+    return item.subject ? `${i + 1}. ${label} (${item.member_count || '?'} members)` : `${i + 1}. ${label}`;
+  }).join('\n');
+}
+
+function formatTargetChoices(candidates) {
+  return candidates.map((c, i) => {
+    const item = c.item || {};
+    const isGroup = item.__targetType === 'group' || (!!item.subject && !item.display_name);
+    const label = item.subject || item.display_name || item.push_name || item.name || 'unknown';
+    return `${i + 1}. [${isGroup ? 'group' : 'person'}] ${label}`;
+  }).join('\n');
+}
+
+function formatPersonChoices(candidates) {
+  return candidates.map((c, i) => {
+    const item = c.item || {};
+    return `${i + 1}. ${item.display_name || item.push_name || item.name || 'unknown person'}`;
+  }).join('\n');
+}
+
+async function applyGroupControl(type, group, requestedMode) {
+  if (!group?.jid) return 'group select nahi ho paya';
+  if (type === 'DISABLE_GROUP') {
+    await setGroupMode(group.jid, 'mute');
+    await disableGroup(group.jid);
+    return `${group.subject} mein ab bilkul chup — mute kar diya.`;
+  }
+  if (type === 'SET_MODE') {
+    const mode = ['ambient', 'trigger', 'mute'].includes(requestedMode) ? requestedMode : 'ambient';
+    if (mode === 'mute') {
+      await setGroupMode(group.jid, 'mute');
+      await disableGroup(group.jid);
+      return `${group.subject} ko mute kar diya. ab wahan reply nahi karega.`;
+    }
+    // Switching to a speaking mode should also re-enable groups previously disabled.
+    await enableGroup(group.jid, mode);
+    return `${group.subject} ka mode ${mode} kar diya.`;
+  }
+  await enableGroup(group.jid, 'ambient');
+  return `${group.subject} unmute/enable ho gaya — ambient mode mein ab bolega.`;
+}
+
+async function executeGroupControl(parsed, ctx) {
+  const { intent, entities = {} } = parsed;
+  const groups = await getAllGroups();
+  if (!groups.length) return 'koi WhatsApp group nahi mila. pehle group list sync karwa.';
+
+  const { match, candidates } = findGroupTarget(entities.group, groups);
+  if (match) return applyGroupControl(intent, match, entities.mode);
+
+  const usable = candidates.length ? candidates : groups.map(item => ({ item, score: 0 }));
+  pendingDisambig.set(ctx.senderJid, { type: intent, candidates: usable, originalIntent: parsed });
+  const actionLabel = intent === 'ENABLE_GROUP' ? 'unmute/enable' : intent === 'DISABLE_GROUP' ? 'mute' : `${entities.mode || 'ambient'} mode set`;
+  return `${entities.group ? `“${entities.group}” ka exact group match clear nahi hua` : `kis group mein ${actionLabel} karna hai?`}\n${formatGroupChoices(usable)}\nnumber ya exact naam reply kar de.`;
+}
+
 /**
  * Execute a parsed intent.
  */
@@ -320,42 +371,10 @@ async function executeIntent(parsed, ctx, ownerChatJid) {
   const { senderJid } = ctx;
 
   switch (intent) {
-    case 'ENABLE_GROUP': {
-      const groups = await getAllGroups();
-      if (!groups.length) return 'koi group nahi dikh raha abhi';
-      if (!entities.group) {
-        return 'kaunsa group enable karna hai? naam bhej';
-      }
-      const { match, ambiguous, candidates } = fuzzyMatch(entities.group, groups.map(g => ({ ...g, name: g.subject })));
-      if (match) {
-        await enableGroup(match.jid, 'ambient');
-        return `done, ${match.subject} mein ab bolega`;
-      }
-      if (ambiguous || candidates.length > 0) {
-        pendingDisambig.set(senderJid, { type: 'ENABLE_GROUP', candidates, originalIntent: parsed });
-        const list = candidates.map((c, i) => `${i + 1}. ${c.item.subject} (${c.item.member_count || '?'} members)`).join('\n');
-        return `${candidates.length} groups mile:\n${list}\nkaunsa?`;
-      }
-      return 'koi group nahi mila is naam se';
-    }
-
-    case 'DISABLE_GROUP': {
-      const groups = await getAllGroups();
-      if (!entities.group) return 'kaunsa group? exact naam bhej de, ya groups list bol';
-      const norm = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      const wanted = norm(entities.group);
-      const exact = groups.filter(g => norm(g.subject) === wanted);
-      if (exact.length === 1) {
-        await disableGroup(exact[0].jid);
-        return `${exact[0].subject} mein ab chup. group mute kar diya`;
-      }
-      // Never mute a group on a weak/fuzzy guess. Offer ranked candidates for a number reply.
-      const ranked = scoreAll(entities.group, groups.map(g => ({ ...g, name: g.subject })))
-        .filter(c => c.score > 0.25).slice(0, 8);
-      const choices = ranked.length ? ranked : groups.slice(0, 12).map(item => ({ item, score: 0 }));
-      pendingDisambig.set(senderJid, { type: 'DISABLE_GROUP', candidates: choices, originalIntent: parsed });
-      return `exact group match nahi mila${exact.length > 1 ? ' (duplicate names hain)' : ''}. kaunsa mute karun?\n${choices.map((c, i) => `${i + 1}. ${c.item.subject} (${c.item.member_count || '?'} members)`).join('\n')}\nnumber reply kar de`;
-    }
+    case 'ENABLE_GROUP':
+    case 'DISABLE_GROUP':
+    case 'SET_MODE':
+      return executeGroupControl(parsed, ctx);
 
     case 'GET_STATUS': {
       const { getSocketState } = await import('../gateway/socket.js');
@@ -416,9 +435,11 @@ async function executeIntent(parsed, ctx, ownerChatJid) {
 
     case 'SEND_MESSAGE': {
       if (!entities.person || !entities.text) return 'kisko bhejunga aur kya bhejunga?';
-      const people = await findPeopleByName(entities.person);
+      const people = await getRecentPeopleForResolution();
       const groups = await getAllGroups();
-      const target = resolveTarget(entities.person, people, groups);
+      const target = entities.resolvedTarget
+        ? { match: entities.resolvedTarget.item, type: entities.resolvedTarget.type, ambiguous: false }
+        : resolveTarget(entities.person, people, groups);
 
       if (target.match) {
         const jid = target.type === 'group' ? target.match.jid :
@@ -434,9 +455,9 @@ async function executeIntent(parsed, ctx, ownerChatJid) {
       }
       if (target.ambiguous) {
         pendingDisambig.set(senderJid, { type: 'SEND_MESSAGE', candidates: target.candidates, originalIntent: { ...parsed, entities } });
-        return `kaun? ${target.candidates.map((c, i) => `${i+1}. ${c.item?.display_name || c.item?.subject || 'unknown'}`).join('\n')}`;
+        return `kaun?\n${formatTargetChoices(target.candidates)}\nnumber ya naam reply kar de`;
       }
-      return `${entities.person} nahi mila`;
+      return `${entities.person} ka clear match nahi mila. naam dobara likh ya target list mein se choose kar.`;
     }
 
     case 'ADD_DAY_NOTE': {
@@ -507,49 +528,56 @@ async function executeIntent(parsed, ctx, ownerChatJid) {
       return `*Groups:*\n${lines.join('\n')}`;
     }
 
-    case 'SET_MODE': {
-      const groups = await getAllGroups();
-      if (!entities.group) return 'kaunse group ka mode set karu?';
-      const { match } = fuzzyMatch(entities.group, groups.map(g => ({ ...g, name: g.subject })));
-      if (match) {
-        const mode = entities.mode || 'ambient';
-        await setGroupMode(match.jid, mode);
-        return `${match.subject} ka mode ${mode} kar diya`;
-      }
-      return 'group nahi mila';
-    }
-
     case 'MASS_BUNK_STATS': {
       const groups = await getAllGroups();
-      // If no group specified, pick the first enabled one
-      const targetGroup = entities.group 
-        ? fuzzyMatch(entities.group, groups.map(g => ({ ...g, name: g.subject }))).match
-        : groups.find(g => g.enabled);
-        
-      if (targetGroup) {
-        // entities.date is a string like '2026-10-08'; convert to a proper Date
-        const targetDate = entities.date
-          ? new Date(entities.date + 'T00:00:00+05:30')
-          : new Date();
-        await runMassBunkAnalysis(targetGroup.jid, targetDate, ownerChatJid);
-        return `mass bunk analysis chal rahi hai — report thodi der mein aayegi`;
+      if (!groups.length) return 'koi WhatsApp group nahi mila. pehle group list sync karwa.';
+
+      // Use the same strict resolver as mute/unmute/mode changes: never guess a
+      // weak match for analysis that triggers a group-facing workflow.
+      let targetGroup = null;
+      if (entities.group) {
+        const resolution = findGroupTarget(entities.group, groups);
+        targetGroup = resolution.match;
+        if (!targetGroup) {
+          const candidates = resolution.candidates.length
+            ? resolution.candidates
+            : groups.map(item => ({ item, score: 0 }));
+          pendingDisambig.set(senderJid, { type: 'MASS_BUNK_STATS', candidates, originalIntent: parsed });
+          return `“${entities.group}” ka exact group match clear nahi hua. kis group ka mass-bunk analysis karun?\n${formatGroupChoices(candidates)}\nnumber ya exact naam reply kar de.`;
+        }
+      } else {
+        targetGroup = groups.find(g => g.enabled);
       }
-      return 'group nahi mila mass bunk stats ke liye';
+
+      if (!targetGroup) return 'mass-bunk analysis ke liye group select nahi ho paya. group ka naam bata.';
+      // entities.date is a string like '2026-10-08'; convert to a proper Date
+      const targetDate = entities.date
+        ? new Date(entities.date + 'T00:00:00+05:30')
+        : new Date();
+      await runMassBunkAnalysis(targetGroup.jid, targetDate, ownerChatJid);
+      return `mass bunk analysis chal rahi hai — report thodi der mein aayegi`;
     }
 
     case 'FORGET_PERSON': {
       if (!entities.person) return 'kisko bhulna hai?';
-      const people = await findPeopleByName(entities.person);
-      if (people.length > 0) {
-        try {
-          const { forgetPerson } = await import('../db/repos/memory.js');
-          await forgetPerson(people[0].id);
-          return `${people[0].display_name || entities.person} ke baare mein sab bhool gaya`;
-        } catch(e) {
-          return `${people[0].display_name || entities.person} ke baare mein bhoolne mein error aayi`;
+      let person = entities.resolvedPerson || null;
+      if (!person) {
+        const people = await getRecentPeopleForResolution();
+        const result = findPersonTarget(entities.person, people);
+        if (!result.match) {
+          if (!result.candidates.length) return `${entities.person} naam ka contact nahi mila.`;
+          pendingDisambig.set(senderJid, { type: 'FORGET_PERSON', candidates: result.candidates, originalIntent: parsed });
+          return `kis person ki memory bhoolun?\n${formatPersonChoices(result.candidates)}\nnumber ya naam reply kar de`;
         }
+        person = result.match;
       }
-      return `${entities.person} pehle se hi yaad nahi hai`;
+      try {
+        const { forgetPerson } = await import('../db/repos/memory.js');
+        await forgetPerson(person.id);
+        return `${person.display_name || person.push_name || entities.person} ke baare mein sab bhool gaya`;
+      } catch {
+        return `${person.display_name || entities.person} ke baare mein bhoolne mein error aayi`;
+      }
     }
 
     case 'SCHEDULE_MESSAGE': {
@@ -560,14 +588,17 @@ async function executeIntent(parsed, ctx, ownerChatJid) {
       });
       if (!runAt) return 'kis time bheju? jaise “kal subah 8 baje” ya “aaj 6 pm” bol';
 
-      const people = await findPeopleByName(entities.person);
+      const people = await getRecentPeopleForResolution();
       const groups = await getAllGroups();
-      const target = resolveTarget(entities.person, people, groups);
+      const target = entities.resolvedTarget
+        ? { match: entities.resolvedTarget.item, type: entities.resolvedTarget.type, ambiguous: false }
+        : resolveTarget(entities.person, people, groups);
       if (target.ambiguous) {
-        pendingDisambig.set(senderJid, { type: 'SCHEDULE_MESSAGE', candidates: target.candidates, originalIntent: { ...parsed, entities: { ...entities, scheduledAtISO: runAt.toISOString() } } });
-        return `kaun sa ${entities.person}?\n${target.candidates.map((c, i) => `${i + 1}. ${c.item.display_name || c.item.push_name || c.item.subject || 'unknown'}`).join('\n')}\nnumber reply kar de`;
+        const intentForClarification = { ...parsed, entities: { ...entities, scheduledAtISO: runAt.toISOString() } };
+        pendingDisambig.set(senderJid, { type: 'SCHEDULE_MESSAGE', candidates: target.candidates, originalIntent: intentForClarification });
+        return `kaun sa ${entities.person}?\n${formatTargetChoices(target.candidates)}\nnumber ya naam reply kar de`;
       }
-      if (!target.match) return `${entities.person} nahi mila — naam/group ka sahi naam bata`;
+      if (!target.match) return `${entities.person} ka clear match nahi mila. naam dobara likh ya target list mein se choose kar.`;
       const jid = target.type === 'group' ? target.match.jid :
         (await import('../db/repos/people.js').then(m => m.getIdentities(target.match.id)).catch(() => []))[0]?.jid;
       if (!jid) return `${entities.person} ka WhatsApp contact nahi mila`;
@@ -586,12 +617,19 @@ async function executeIntent(parsed, ctx, ownerChatJid) {
 
     case 'NAME_SET': {
       if (!entities.person || !entities.text) return 'kiska naam kya set karu?';
-      const people = await findPeopleByName(entities.person);
-      if (people.length) {
-        await assignNameDirectly(people[0].id, entities.text);
-        return `${people[0].display_name || 'wo'} ka naam ab se ${entities.text} set kar diya`;
+      let person = entities.resolvedPerson || null;
+      if (!person) {
+        const people = await getRecentPeopleForResolution();
+        const result = findPersonTarget(entities.person, people);
+        if (!result.match) {
+          if (!result.candidates.length) return `${entities.person} naam ka contact nahi mila.`;
+          pendingDisambig.set(senderJid, { type: 'NAME_SET', candidates: result.candidates, originalIntent: parsed });
+          return `kis person ka naam change karna hai?\n${formatPersonChoices(result.candidates)}\nnumber ya naam reply kar de`;
+        }
+        person = result.match;
       }
-      return `${entities.person} nahi mila`;
+      await assignNameDirectly(person.id, entities.text);
+      return `${person.display_name || person.push_name || 'wo'} ka naam ab se ${entities.text} set kar diya`;
     }
 
     case 'NAME_APPROVE':
@@ -667,33 +705,51 @@ async function handleApprovalCode(code, decision, extra, ctx) {
  */
 async function handleDisambigReply(senderJid, text, pending, ownerChatJid, ctx) {
   const { type, candidates, originalIntent } = pending;
+
+  // Prefer a numbered choice, but also accept a candidate name. Keep the pending
+  // state until a valid answer arrives so a typo does not lose the selection list.
+  let chosen = null;
+  const numMatch = text.trim().match(/^(?:no\.?\s*)?(\d+)(?:\s*[,.)])?$/i);
+  if (numMatch) {
+    const n = Number(numMatch[1]) - 1;
+    if (n >= 0 && n < candidates.length) chosen = candidates[n].item;
+  } else {
+    chosen = resolveDisambigChoice(text, candidates, c => c.item?.subject || c.item?.display_name || c.item?.push_name || c.item?.name || 'unknown');
+  }
+
+  if (!chosen) {
+    const choiceList = ['SEND_MESSAGE', 'SCHEDULE_MESSAGE'].includes(type)
+      ? formatTargetChoices(candidates)
+      : type === 'FORGET_PERSON' || type === 'NAME_SET'
+        ? formatPersonChoices(candidates)
+        : formatGroupChoices(candidates);
+    return `number ya naam bhej de:\n${choiceList}`;
+  }
   pendingDisambig.delete(senderJid);
 
-  // Try to resolve choice
-  const numMatch = text.match(/^\d+$/);
-  if (numMatch) {
-    const n = parseInt(numMatch[0]) - 1;
-    if (n >= 0 && n < candidates.length) {
-      const chosen = candidates[n].item;
-      if (type === 'ENABLE_GROUP') {
-        await enableGroup(chosen.jid, 'ambient');
-        return `done, ${chosen.subject} mein ab bolega`;
-      }
-      if (type === 'DISABLE_GROUP') {
-        await disableGroup(chosen.jid);
-        return `${chosen.subject} mein ab chup. group mute kar diya`;
-      }
-      if (type === 'SCHEDULE_MESSAGE' || type === 'SEND_MESSAGE') {
-        const chosenName = chosen.display_name || chosen.push_name || chosen.subject || chosen.name;
-        const updated = { ...originalIntent, entities: { ...originalIntent.entities, person: chosenName } };
-        if (type === 'SCHEDULE_MESSAGE' && originalIntent.entities?.scheduledAtISO) {
-          updated.entities.scheduleAtPhrase = originalIntent.entities.scheduledAtISO;
-          updated.entities.time = null;
-          updated.entities.date = null;
-        }
-        return executeIntent(updated, ctx, ownerChatJid);
-      }
+  if (['ENABLE_GROUP', 'DISABLE_GROUP', 'SET_MODE'].includes(type)) {
+    return applyGroupControl(type, chosen, originalIntent?.entities?.mode);
+  }
+  if (type === 'MASS_BUNK_STATS') {
+    const date = originalIntent?.entities?.date;
+    const targetDate = date ? new Date(date + 'T00:00:00+05:30') : new Date();
+    await runMassBunkAnalysis(chosen.jid, targetDate, ownerChatJid);
+    return `mass bunk analysis chal rahi hai — report thodi der mein aayegi`;
+  }
+  if (type === 'FORGET_PERSON' || type === 'NAME_SET') {
+    const updated = { ...originalIntent, entities: { ...originalIntent.entities, resolvedPerson: chosen } };
+    return executeIntent(updated, ctx, ownerChatJid);
+  }
+  if (type === 'SCHEDULE_MESSAGE' || type === 'SEND_MESSAGE') {
+    const chosenName = chosen.display_name || chosen.push_name || chosen.subject || chosen.name;
+    const targetType = chosen.__targetType || (chosen.subject && !chosen.display_name ? 'group' : 'person');
+    const updated = { ...originalIntent, entities: { ...originalIntent.entities, person: chosenName, resolvedTarget: { type: targetType, item: chosen } } };
+    if (type === 'SCHEDULE_MESSAGE' && originalIntent.entities?.scheduledAtISO) {
+      updated.entities.scheduleAtPhrase = originalIntent.entities.scheduledAtISO;
+      updated.entities.time = null;
+      updated.entities.date = null;
     }
+    return executeIntent(updated, ctx, ownerChatJid);
   }
   return 'samajh nahi aaya. phir se try kar';
 }

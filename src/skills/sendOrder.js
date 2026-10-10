@@ -4,9 +4,8 @@
  * Compose and send messages on behalf of the owner.
  */
 import { createJob } from '../db/repos/timetable.js';
-import { findPeopleByName } from '../db/repos/people.js';
+import { resolveNamedTarget } from '../util/targetResolver.js';
 import { getAllGroups } from '../db/repos/groups.js';
-import { fuzzyMatch } from '../util/fuzzy.js';
 import { getLogger } from '../logger.js';
 
 const log = getLogger('skills/sendOrder');
@@ -62,18 +61,7 @@ export async function scheduleOrderedMessage({ targetName, targetJid, message, r
  * @returns {{ match: object|null, ambiguous: boolean, candidates: object[], type: 'person'|'group'|null }}
  */
 export function resolveTarget(name, people, groups) {
-  // Try people first
-  const peopleResult = fuzzyMatch(name, people.map(p => ({ ...p, name: p.display_name || p.push_name || '' })));
-  if (peopleResult.match) return { ...peopleResult, type: 'person' };
-
-  // Try groups
-  const groupResult = fuzzyMatch(name, groups.map(g => ({ ...g, name: g.subject || '' })));
-  if (groupResult.match) return { ...groupResult, type: 'group' };
-
-  if (peopleResult.ambiguous) return { ...peopleResult, type: 'person' };
-  if (groupResult.ambiguous) return { ...groupResult, type: 'group' };
-
-  return { match: null, ambiguous: false, candidates: [...peopleResult.candidates, ...groupResult.candidates], type: null };
+  return resolveNamedTarget(name, people, groups);
 }
 
 /**

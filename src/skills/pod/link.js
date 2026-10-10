@@ -9,6 +9,7 @@ import {
 } from '../../db/repos/pod.js';
 import { podLogin } from './client.js';
 import { getLogger } from '../../logger.js';
+import { isPodDataRequest, isPodLinkCommand } from '../../util/podIntent.js';
 
 const log = getLogger('skills/pod/link');
 
@@ -65,21 +66,22 @@ export async function handleLinkFlow(personId, text) {
   // ── Load current session ──────────────────────────────────────────
   const session = await getPodLinkSession(personId).catch(() => null);
 
-  // ── Trigger new link session (explicit commands only) ─────────────
-  const isExplicitLinkTrigger =
-    t === '!link' ||
-    t === 'link pod' ||
-    /\b(pod link|link account|connect pod|pod connect)\b/.test(t);
+  // ── Start linking from either an explicit request or an actual Pod-data request.
+  // Asking for attendance/bunk/marks is treated as intent to link; don't make the
+  // person send a second command or answer a redundant yes/no confirmation.
+  const isExplicitLinkTrigger = isPodLinkCommand(t);
+  const wantsPodData = isPodDataRequest(t);
 
-  if (!session && isExplicitLinkTrigger) {
+  if (!session && (isExplicitLinkTrigger || wantsPodData)) {
     const linked = await hasPodAccount(personId).catch(() => false);
     if (linked) {
-      return { handled: true, reply: 'toh pod pehle se linked hai. attendance dekhna hai kya?' };
+      if (isExplicitLinkTrigger) return { handled: true, reply: 'pod pehle se linked hai. attendance, bunk ya marks jo chahiye pooch le.' };
+      return { handled: false, reply: null };
     }
-    await upsertPodLinkSession(personId, 'consent', null);
+    await upsertPodLinkSession(personId, 'email', { attempts: 0 });
     return {
       handled: true,
-      reply: `pod link karne se main teri attendance dekh paunga aur bunk ka hisaab bata paunga. mass bunk ke time risk hua toh tujhe private mein warn bhi karunga.\n\nhaan ya nahi?`,
+      reply: `attendance nikalne ke liye pehle Pod link karte hain. Apna Medi-Caps login email bhej (en...@medicaps.ac.in). Credentials encrypted save honge taaki baar-baar na maangna pade. Rukna ho toh \"cancel\" bol.`,
     };
   }
 
@@ -92,16 +94,17 @@ export async function handleLinkFlow(personId, text) {
     return { handled: true, reply: 'link session expire ho gaya. dobara "link pod" bol' };
   }
 
-  // ── Consent step ──────────────────────────────────────────────────
+  // ── Legacy consent step ───────────────────────────────────────────
+  // Older builds stored a yes/no state. Upgrade it silently so the user only
+  // needs to provide their email/password once they requested Pod data/linking.
   if (session.step === 'consent') {
-    if (/^(haan|ha|yes|ok|okay|chalo|kar|proceed|sure|bilkul|haan bhai|kar de|karlo|theek hai)$/i.test(t) ||
-        /\b(haan|yes|ok|chalo|kar de|link karo|kardo|done|go ahead)\b/.test(t)) {
-      await upsertPodLinkSession(personId, 'email', { attempts: 0 });
-      return { handled: true, reply: 'apna pod login email bhej (en24...@medicaps.ac.in format mein)' };
+    if (CANCEL_PATTERNS.some(p => p.test(t))) {
+      await deletePodLinkSession(personId);
+      return { handled: true, reply: 'theek hai, linking cancel kar di. jab chahiye bol dena.' };
     }
-    // Any other message at consent = decline
-    await deletePodLinkSession(personId);
-    return { handled: true, reply: 'theek hai, no link. jab chahiye tab bol dena' };
+    await upsertPodLinkSession(personId, 'email', { attempts: 0 });
+    if (EMAIL_REGEX.test(text.trim())) return handleLinkFlow(personId, text);
+    return { handled: true, reply: 'apna Medi-Caps Pod login email bhej (en...@medicaps.ac.in). Credentials encrypted save honge; cancel bolke ruk sakta hai.' };
   }
 
   // ── Email step ───────────────────────────────────────────────────
@@ -109,6 +112,10 @@ export async function handleLinkFlow(personId, text) {
     const email = text.trim();
     const partial = session.partial || {};
     const attempts = (partial.attempts || 0);
+
+    if (isPodDataRequest(t)) {
+      return { handled: true, reply: 'haan attendance/bunk dekh dunga — bas pehle apna Medi-Caps login email bhej (en...@medicaps.ac.in). Rukna ho toh cancel bol.' };
+    }
 
     // If this looks conversational, NOT an email attempt → cancel flow
     if (isConversational(email)) {
@@ -137,7 +144,7 @@ export async function handleLinkFlow(personId, text) {
 
     // Valid email — move to password step
     await upsertPodLinkSession(personId, 'password', { email, attempts: 0 });
-    return { handled: true, reply: 'password bhej (message delete ho jaayega turant)' };
+    return { handled: true, reply: 'ab Pod password bhej. Is DM mein hi use hoga aur database mein encrypted save hoga; kisi group mein password mat bhejna. cancel bolke ruk sakta hai.' };
   }
 
   // ── Password step ─────────────────────────────────────────────────

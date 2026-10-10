@@ -209,3 +209,18 @@ export async function findPeopleByName(name) {
   );
   return result.rows;
 }
+
+/**
+ * Recent people used only to offer safe owner-side name suggestions when a
+ * command has no exact or strong match. Never used to expose data to groups.
+ */
+export async function getRecentPeopleForResolution(limit = 50) {
+  const safeLimit = Math.max(1, Math.min(100, Number.parseInt(limit, 10) || 50));
+  const result = await query(
+    `SELECT * FROM people
+     ORDER BY last_seen_at DESC NULLS LAST
+     LIMIT $1`,
+    [safeLimit]
+  );
+  return result.rows;
+}

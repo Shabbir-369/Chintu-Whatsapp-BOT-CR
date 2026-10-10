@@ -26,6 +26,7 @@ import { recordReply } from '../policy/limits.js';
 import { decide } from '../brain/decision.js';
 import { getLogger } from '../logger.js';
 import { isCalendarQuestion } from '../util/calendar.js';
+import { isPodDataRequest } from '../util/podIntent.js';
 
 const log = getLogger('router/dmHandler');
 
@@ -99,9 +100,7 @@ export async function handleDm(ctx, sendOwnerCard) {
 
   // ── Step 2: Approved user — Pod linking: explicit trigger or active session ──
   if (access.status === 'approved') {
-    // Only route to link flow if there's an active session OR explicit link command
-    const isExplicitLink = t === '!link' || t === 'link pod' ||
-      /\b(pod link|link account|connect pod|pod connect)\b/.test(t);
+    // Link flow itself decides whether this is a link/data request or a normal chat.
     const podLinkResult = await handleLinkFlow(person.id, text);
 
     if (podLinkResult.handled) {
@@ -117,9 +116,9 @@ export async function handleDm(ctx, sendOwnerCard) {
 
     // Not linked but asking for data → suggest linking
     if (!podLinked) {
-      const wantsData = /\b(attendance|bunk|marks|grade|result|kitni class|chhod sakta|safe.*class)\b/.test(t);
+      const wantsData = isPodDataRequest(t);
       if (wantsData) {
-        await humanSend(chatJid, 'pod account link nahi hai abhi. \"link pod\" bol, main set kar deta hoon', { sourceMessage: rawMsg });
+        await humanSend(chatJid, 'Pod link flow start nahi hua. apna Medi-Caps login email bhejne ke liye “link pod” bol de.', { sourceMessage: rawMsg });
         recordReply(person.id, chatJid);
         return;
       }
