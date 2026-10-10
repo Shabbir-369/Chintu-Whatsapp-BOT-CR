@@ -1,0 +1,7 @@
+auth/
+*.env
+.env
+node_modules/
+*.log
+blueprint.txt
+blueprint_full.txt

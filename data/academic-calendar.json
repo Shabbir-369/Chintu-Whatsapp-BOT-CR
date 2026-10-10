@@ -1,0 +1,120 @@
+{
+  "title": "Academic Calendar (Tentative) ODD Semester July - Dec. 2026",
+  "college": "Medicaps University, Indore",
+  "examAndAcademicEvents": [
+    {
+      "date": "2026-09-28",
+      "endDate": "2026-10-03",
+      "dates": [
+        "2026-09-28",
+        "2026-09-29",
+        "2026-09-30",
+        "2026-10-01",
+        "2026-10-03"
+      ],
+      "name": "MST-I",
+      "type": "exam",
+      "notes": "MST-I is shown on Sep 28-30, Oct 1 and Oct 3; Oct 2 is Gandhi Jayanti."
+    },
+    {
+      "date": "2026-11-16",
+      "endDate": "2026-11-20",
+      "name": "MST-II",
+      "type": "exam"
+    },
+    {
+      "date": "2026-12-01",
+      "endDate": "2026-12-05",
+      "name": "Preparatory Leave",
+      "type": "academic-break"
+    },
+    {
+      "date": "2026-12-07",
+      "endDate": "2026-12-24",
+      "name": "End Semester Examination",
+      "type": "exam"
+    },
+    {
+      "date": "2026-12-28",
+      "endDate": "2027-01-08",
+      "name": "End Semester examination and Copy Viewing",
+      "type": "exam"
+    },
+    {
+      "date": "2026-11-27",
+      "name": "END of Teaching",
+      "type": "academic"
+    },
+    {
+      "date": "2026-12-26",
+      "name": "SHLAMCAT-End Sem Soft skill Examination",
+      "type": "exam"
+    }
+  ],
+  "holidays": [
+    {
+      "date": "2026-08-15",
+      "name": "Independence Day"
+    },
+    {
+      "date": "2026-08-28",
+      "name": "Raksha Bandhan"
+    },
+    {
+      "date": "2026-09-04",
+      "name": "Janmashtami"
+    },
+    {
+      "date": "2026-09-14",
+      "name": "Ganesh Chaturthi"
+    },
+    {
+      "date": "2026-09-26",
+      "name": "Day Following Anant Chaturdashi"
+    },
+    {
+      "date": "2026-10-02",
+      "name": "Gandhi Jayanti"
+    },
+    {
+      "date": "2026-10-20",
+      "name": "Vijayadashami"
+    },
+    {
+      "date": "2026-11-06",
+      "endDate": "2026-11-11",
+      "name": "Deepawali"
+    },
+    {
+      "date": "2026-11-24",
+      "name": "Guru Nanak Jayanti"
+    },
+    {
+      "date": "2026-12-25",
+      "name": "Christmas Day"
+    }
+  ],
+  "otherCalendarItems": [
+    {
+      "date": "2026-07-20",
+      "name": "Start of ODD Higher Semester Classes"
+    },
+    {
+      "date": "2026-08-10",
+      "name": "Start of ODD Semester Course Registration"
+    },
+    {
+      "date": "2026-10-05",
+      "name": "SHLAMCAT-SVAR test"
+    },
+    {
+      "date": "2026-11-21",
+      "name": "SHLAMCAT-AI mock interview"
+    },
+    {
+      "date": "2026-12-29",
+      "name": "Convocation"
+    }
+  ],
+  "sourceNote": "Transcribed from the user-provided one-page Medicaps University tentative ODD semester calendar image."
+}

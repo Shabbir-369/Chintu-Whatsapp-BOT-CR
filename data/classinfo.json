@@ -1,0 +1,481 @@
+{
+  "className": "B.Tech. Information Technology - Semester V - Section V-B",
+  "college": "Medicaps University, Indore",
+  "semester": "V",
+  "section": "V-B",
+  "effectiveFrom": "2026-08-19",
+  "classCoordinator": "Prof. Rahul Singh Pawar",
+  "defaultRoom": "B-007",
+  "timeSlots": {
+    "I": "08:30-09:20",
+    "II": "09:20-10:10",
+    "III": "10:20-11:10",
+    "IV": "11:10-12:00",
+    "V": "12:00-12:50",
+    "VI": "12:50-13:40",
+    "VII": "13:40-14:20",
+    "VIII": "14:20-15:10",
+    "IX": "15:10-16:00",
+    "X": "16:00-16:50"
+  },
+  "batches": {
+    "B1": "Roll No. 60–95",
+    "B2": "Remaining (Roll No. < 60)"
+  },
+  "timetable": {
+    "Monday": [
+      {
+        "slot": "IV",
+        "time": "11:10-12:00",
+        "code": "OE00101",
+        "subject": "Blockchain Architecture",
+        "short": "BCA-L",
+        "faculty": "Prof. Chanda Chouhan",
+        "room": "B-007"
+      },
+      {
+        "slot": "V",
+        "time": "12:00-12:50",
+        "code": "IT3CO39",
+        "subject": "Computer Networks",
+        "short": "CNL",
+        "faculty": "Prof. Rahul Singh Pawar",
+        "room": "B-007"
+      },
+      {
+        "slot": "VII",
+        "time": "13:40-14:20",
+        "code": "EN3NG09",
+        "subject": "Soft Skills-III",
+        "short": "SS-III-L",
+        "faculty": "NF 1",
+        "room": "B-007"
+      },
+      {
+        "slot": "VIII",
+        "time": "14:20-15:10",
+        "code": "EN3NG09",
+        "subject": "Soft Skills-III",
+        "short": "SS-III-L",
+        "faculty": "NF 1",
+        "room": "B-007"
+      },
+      {
+        "slot": "IX",
+        "time": "15:10-16:00",
+        "parallel": [
+          {
+            "code": "IT3EA03",
+            "subject": "Soft Computing",
+            "short": "SC-L",
+            "faculty": "Prof. Jyoti Kukade",
+            "room": "B-005"
+          },
+          {
+            "code": "IT3ED07",
+            "subject": "Data Science",
+            "short": "DSc-L",
+            "faculty": "Prof. Sagar Pandya",
+            "room": "B-007"
+          }
+        ]
+      },
+      {
+        "slot": "X",
+        "time": "16:00-16:50",
+        "code": "IT3EL10",
+        "subject": "Information Security",
+        "short": "IS-L",
+        "faculty": "Prof. Shyam Patel",
+        "room": "B-007"
+      }
+    ],
+    "Tuesday": [
+      {
+        "slot": "IV",
+        "time": "11:10-12:00",
+        "parallel": [
+          {
+            "code": "IT3EA03",
+            "subject": "Soft Computing",
+            "short": "SC-L",
+            "faculty": "Prof. Jyoti Kukade",
+            "room": "B-005"
+          },
+          {
+            "code": "IT3ED07",
+            "subject": "Data Science",
+            "short": "DSc-L",
+            "faculty": "Prof. Sagar Pandya",
+            "room": "B-007"
+          }
+        ]
+      },
+      {
+        "slot": "V",
+        "time": "12:00-12:50",
+        "code": "OE00101",
+        "subject": "Blockchain Architecture",
+        "short": "BCA-L",
+        "faculty": "Prof. Chanda Chouhan",
+        "room": "B-007"
+      },
+      {
+        "slot": "VII",
+        "time": "13:40-14:20",
+        "batches": [
+          {
+            "batch": "B1",
+            "code": "IT3ES01",
+            "subject": "Web Programming",
+            "short": "WP-P",
+            "faculty": "Prof. Shyam Patel / Prof. Deepa Pandit",
+            "room": "C-203"
+          },
+          {
+            "batch": "B2",
+            "code": "IT3CO39",
+            "subject": "Computer Networks",
+            "short": "CN-P",
+            "faculty": "Prof. Rahul Singh Pawar / Prof. Chanda Chouhan",
+            "room": "C-201"
+          }
+        ]
+      },
+      {
+        "slot": "VIII",
+        "time": "14:20-15:10",
+        "batches": [
+          {
+            "batch": "B1",
+            "code": "IT3ES01",
+            "subject": "Web Programming",
+            "short": "WP-P",
+            "faculty": "Prof. Shyam Patel / Prof. Deepa Pandit",
+            "room": "C-203"
+          },
+          {
+            "batch": "B2",
+            "code": "IT3CO39",
+            "subject": "Computer Networks",
+            "short": "CN-P",
+            "faculty": "Prof. Rahul Singh Pawar / Prof. Chanda Chouhan",
+            "room": "C-201"
+          }
+        ]
+      },
+      {
+        "slot": "IX",
+        "time": "15:10-16:00",
+        "code": "IT3CO39",
+        "subject": "Computer Networks",
+        "short": "CNL",
+        "faculty": "Prof. Rahul Singh Pawar",
+        "room": "B-007"
+      },
+      {
+        "slot": "X",
+        "time": "16:00-16:50",
+        "code": "IT3EL10",
+        "subject": "Information Security",
+        "short": "IS-L",
+        "faculty": "Prof. Shyam Patel",
+        "room": "B-007"
+      }
+    ],
+    "Wednesday": [
+      {
+        "slot": "IV",
+        "time": "11:10-12:00",
+        "subject": "Mentorship/Library",
+        "short": "Mentorship/Library",
+        "faculty": "",
+        "room": "B-007"
+      },
+      {
+        "slot": "V",
+        "time": "12:00-12:50",
+        "code": "EN3HS04",
+        "subject": "Fundamentals of Management, Economics and Accountancy",
+        "short": "FMEA-L",
+        "faculty": "Prof. Harshal Jain",
+        "room": "B-007"
+      },
+      {
+        "slot": "VII",
+        "time": "13:40-14:20",
+        "code": "IT3CO33",
+        "subject": "Theory of Computation",
+        "short": "TOC-L",
+        "faculty": "Prof. Vidhya Samad Barpha",
+        "room": "B-007"
+      },
+      {
+        "slot": "VIII",
+        "time": "14:20-15:10",
+        "code": "OE00101",
+        "subject": "Blockchain Architecture",
+        "short": "BCA-L",
+        "faculty": "Prof. Chanda Chouhan",
+        "room": "B-007"
+      },
+      {
+        "slot": "IX",
+        "time": "15:10-16:00",
+        "parallel": [
+          {
+            "code": "IT3EA03",
+            "subject": "Soft Computing",
+            "short": "SC-L",
+            "faculty": "Prof. Jyoti Kukade",
+            "room": "B-005"
+          },
+          {
+            "code": "IT3ED07",
+            "subject": "Data Science",
+            "short": "DSc-L",
+            "faculty": "Prof. Sagar Pandya",
+            "room": "B-007"
+          }
+        ]
+      },
+      {
+        "slot": "X",
+        "time": "16:00-16:50",
+        "code": "IT3EL10",
+        "subject": "Information Security",
+        "short": "IS-L",
+        "faculty": "Prof. Shyam Patel",
+        "room": "B-007"
+      }
+    ],
+    "Thursday": [
+      {
+        "slot": "IV",
+        "time": "11:10-12:00",
+        "subject": "Mentorship/Library",
+        "short": "Mentorship/Library",
+        "faculty": "",
+        "room": "B-007"
+      },
+      {
+        "slot": "V",
+        "time": "12:00-12:50",
+        "code": "EN3HS04",
+        "subject": "Fundamentals of Management, Economics and Accountancy",
+        "short": "FMEA-L",
+        "faculty": "Prof. Harshal Jain",
+        "room": "B-007"
+      },
+      {
+        "slot": "VII",
+        "time": "13:40-14:20",
+        "code": "IT3CO39",
+        "subject": "Computer Networks",
+        "short": "CNL",
+        "faculty": "Prof. Rahul Singh Pawar",
+        "room": "B-007"
+      },
+      {
+        "slot": "VIII",
+        "time": "14:20-15:10",
+        "code": "IT3CO33",
+        "subject": "Theory of Computation",
+        "short": "TOC-L",
+        "faculty": "Prof. Vidhya Samad Barpha",
+        "room": "B-007"
+      },
+      {
+        "slot": "IX",
+        "time": "15:10-16:00",
+        "batches": [
+          {
+            "batch": "B1",
+            "code": "IT3CO39",
+            "subject": "Computer Networks",
+            "short": "CN-P",
+            "faculty": "Prof. Rahul Singh Pawar / Prof. Chanda Chouhan",
+            "room": "C-201"
+          },
+          {
+            "batch": "B2",
+            "code": "IT3ES03",
+            "subject": "Python Programming",
+            "short": "PP-P",
+            "faculty": "Prof. Jyoti Kukade / Prof. Sagar Pandya",
+            "room": "C-203"
+          }
+        ]
+      },
+      {
+        "slot": "X",
+        "time": "16:00-16:50",
+        "batches": [
+          {
+            "batch": "B1",
+            "code": "IT3CO39",
+            "subject": "Computer Networks",
+            "short": "CN-P",
+            "faculty": "Prof. Rahul Singh Pawar / Prof. Chanda Chouhan",
+            "room": "C-201"
+          },
+          {
+            "batch": "B2",
+            "code": "IT3ES03",
+            "subject": "Python Programming",
+            "short": "PP-P",
+            "faculty": "Prof. Jyoti Kukade / Prof. Sagar Pandya",
+            "room": "C-203"
+          }
+        ]
+      }
+    ],
+    "Friday": [
+      {
+        "slot": "IV",
+        "time": "11:10-12:00",
+        "batches": [
+          {
+            "batch": "B1",
+            "code": "IT3ES03",
+            "subject": "Python Programming",
+            "short": "PP-P",
+            "faculty": "Prof. Jyoti Kukade / Prof. Sagar Pandya",
+            "room": "C-203"
+          },
+          {
+            "batch": "B2",
+            "code": "IT3ES01",
+            "subject": "Web Programming",
+            "short": "WP-P",
+            "faculty": "Prof. Shyam Patel / Prof. Deepa Pandit",
+            "room": "C-202"
+          }
+        ]
+      },
+      {
+        "slot": "V",
+        "time": "12:00-12:50",
+        "batches": [
+          {
+            "batch": "B1",
+            "code": "IT3ES03",
+            "subject": "Python Programming",
+            "short": "PP-P",
+            "faculty": "Prof. Jyoti Kukade / Prof. Sagar Pandya",
+            "room": "C-203"
+          },
+          {
+            "batch": "B2",
+            "code": "IT3ES01",
+            "subject": "Web Programming",
+            "short": "WP-P",
+            "faculty": "Prof. Shyam Patel / Prof. Deepa Pandit",
+            "room": "C-202"
+          }
+        ]
+      },
+      {
+        "slot": "VII",
+        "time": "13:40-14:20",
+        "code": "IT3CO33",
+        "subject": "Theory of Computation",
+        "short": "TOC-L",
+        "faculty": "Prof. Vidhya Samad Barpha",
+        "room": "B-007"
+      },
+      {
+        "slot": "VIII",
+        "time": "14:20-15:10",
+        "code": "IT3CO39",
+        "subject": "Computer Networks",
+        "short": "CN-L",
+        "faculty": "Prof. Rahul Singh Pawar",
+        "room": "B-007"
+      }
+    ],
+    "Saturday": [],
+    "Sunday": []
+  },
+  "faculty": [
+    {
+      "code": "EN3HS04",
+      "name": "Prof. Harshal Jain",
+      "subject": "Fundamentals of Management, Economics and Accountancy",
+      "role": "Theory"
+    },
+    {
+      "code": "EN3NG09",
+      "name": "NF 1",
+      "subject": "Soft Skills-III",
+      "role": "Theory"
+    },
+    {
+      "code": "IT3CO33",
+      "name": "Prof. Vidhya Samad Barpha",
+      "subject": "Theory of Computation",
+      "role": "Theory"
+    },
+    {
+      "code": "IT3CO39",
+      "name": "Prof. Rahul Singh Pawar",
+      "subject": "Computer Networks",
+      "role": "Theory"
+    },
+    {
+      "code": "IT3CO39",
+      "name": "Prof. Rahul Singh Pawar / Prof. Chanda Chouhan",
+      "subject": "Computer Networks",
+      "role": "Practical"
+    },
+    {
+      "code": "IT3EA03",
+      "name": "Prof. Jyoti Kukade",
+      "subject": "Soft Computing",
+      "role": "Theory"
+    },
+    {
+      "code": "IT3ED07",
+      "name": "Prof. Sagar Pandya",
+      "subject": "Data Science",
+      "role": "Theory"
+    },
+    {
+      "code": "IT3EL10",
+      "name": "Prof. Shyam Patel",
+      "subject": "Information Security",
+      "role": "Theory"
+    },
+    {
+      "code": "IT3ES01",
+      "name": "Prof. Deepa Pandit / Prof. Shyam Patel",
+      "subject": "Web Programming",
+      "role": "Practical"
+    },
+    {
+      "code": "IT3ES03",
+      "name": "Prof. Jyoti Kukade / Prof. Sagar Pandya",
+      "subject": "Python Programming",
+      "role": "Practical"
+    },
+    {
+      "code": "ST3005",
+      "name": "Prof. Rahul Singh Pawar / Prof. Sagar Pandya",
+      "subject": "Skill Training",
+      "role": "Theory"
+    },
+    {
+      "code": "OE00101",
+      "name": "Prof. Chanda Chouhan",
+      "subject": "Blockchain Architecture",
+      "role": "Theory"
+    }
+  ],
+  "attendanceRequiredPercent": 75,
+  "notes": [
+    "Official timetable heading: TIME-TABLE (Aug-Dec 2026) (Odd Semester) (WEF:19-August-2026).",
+    "Default room in the timetable is B-007; practical split rooms are listed per batch.",
+    "Soft Computing/Data Science entries are shown as parallel classes in the timetable image, not labeled B1/B2.",
+    "Attendance percentage shown by Pod is used for live personal attendance; bunk counts use completed class records when Pod exposes attendance statuses."
+  ]
+}
